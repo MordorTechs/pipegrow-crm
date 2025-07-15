@@ -11,6 +11,8 @@ use Webkul\Attribute\Repositories\AttributeValueRepository;
 use Webkul\Contact\Repositories\PersonRepository;
 use Webkul\Core\Eloquent\Repository;
 use Webkul\Lead\Contracts\Lead;
+use Webkul\Lead\Models\Pipeline; // Adicionado: Importa o modelo Pipeline para usar getDefaultPipeline()
+use Webkul\Lead\Repositories\StageRepository; // Adicionado: Importa StageRepository, pois é usado no construtor
 
 class LeadRepository extends Repository
 {
@@ -42,7 +44,7 @@ class LeadRepository extends Repository
     public function __construct(
         protected StageRepository $stageRepository,
         protected PersonRepository $personRepository,
-        protected ProductRepository $productRepository,
+        protected ProductRepository $productRepository, // Certifique-se de que ProductRepository está definido ou ajustado se não for usado
         protected AttributeRepository $attributeRepository,
         protected AttributeValueRepository $attributeValueRepository,
         Container $container
@@ -61,12 +63,27 @@ class LeadRepository extends Repository
     }
 
     /**
+     * Retorna o pipeline de lead padrão.
+     * Assume que o pipeline padrão é o primeiro ou um específico.
+     *
+     * @return \Webkul\Lead\Models\Pipeline|null
+     */
+    public function getDefaultPipeline()
+    {
+        // Aqui você pode definir a lógica para obter o pipeline padrão.
+        // Por exemplo, o primeiro pipeline criado, ou um com um flag 'is_default'.
+        // Para este exemplo, vamos pegar o primeiro pipeline disponível.
+        // Se não houver pipelines, retornará null.
+        return Pipeline::first();
+    }
+
+    /**
      * Get leads query.
      *
-     * @param  int  $pipelineId
-     * @param  int  $pipelineStageId
-     * @param  string  $term
-     * @param  string  $createdAtRange
+     * @param  int    $pipelineId
+     * @param  int    $pipelineStageId
+     * @param  string $term
+     * @param  string $createdAtRange
      * @return mixed
      */
     public function getLeadsQuery($pipelineId, $pipelineStageId, $term, $createdAtRange)
@@ -155,8 +172,8 @@ class LeadRepository extends Repository
     /**
      * Update.
      *
-     * @param  int  $id
-     * @param  array|\Illuminate\Database\Eloquent\Collection  $attributes
+     * @param  int                                     $id
+     * @param  array|\Illuminate\Database\Eloquent\Collection $attributes
      * @return \Webkul\Lead\Contracts\Lead
      */
     public function update(array $data, $id, $attributes = [])
