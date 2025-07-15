@@ -11,7 +11,11 @@ use Webkul\Contact\Repositories\OrganizationRepository;
 use Webkul\Attribute\Repositories\AttributeRepository;
 use Webkul\Lead\Repositories\SourceRepository;
 use Webkul\Lead\Repositories\TypeRepository;
-use Webkul\User\Models\User;
+use Webkul\Lead\Models\Lead;
+use Webkul\Contact\Models\Person;
+use Webkul\Contact\Models\Organization;
+use Webkul\User\Models\User; // Adicionado: Para usar o modelo User no randomUserId()
+use Illuminate\Support\Collection;
 
 class WebhookLeadController extends Controller
 {
@@ -98,7 +102,7 @@ class WebhookLeadController extends Controller
             'url' => $request->fullUrl(),
             'method' => $request->method(),
             'headers' => $request->headers->all(),
-            'payload' => $request->all()
+            'payload' => $request->all() // Loga o payload completo para depuração
         ]);
 
         switch ($type) {
@@ -161,36 +165,13 @@ class WebhookLeadController extends Controller
                 $organizationId = $organization->id;
             }
 
-            $person = $this->personRepository->findOneWhere([['emails', 'LIKE', '%"value":"' . $data['email'] . '"%']]);
-
-            if (! $person) { 
-                $personData = [
-                    'name'            => $data['name'],
-                    'emails'          => [['value' => $data['email'], 'label' => 'work']],
-                    'contact_numbers' => ! empty($data['phone']) ? [['value' => $data['phone'], 'label' => 'mobile']] : null,
-                    'organization_id' => $organizationId,
-                    'user_id'         => $this->randomUserId(),
-                    'entity_type'     => 'persons'
-                ];
-                $person = $this->personRepository->create($personData);
-            } else {
-                $person->name = $data['name'];
-                $existingEmails = collect($person->emails);
-                if (!$existingEmails->contains('value', $data['email'])) {
-                    $person->emails = $existingEmails->push(['value' => $data['email'], 'label' => 'work'])->toArray();
-                }
-
-                $existingPhones = collect($person->contact_numbers);
-                if (!empty($data['phone']) && !$existingPhones->contains('value', $data['phone'])) {
-                    $person->contact_numbers = $existingPhones->push(['value' => $data['phone'], 'label' => 'mobile'])->toArray();
-                }
-                $person->save();
-            }
+            // Encontrar ou Criar Pessoa
+            $person = $this->findOrCreatePerson($data['name'], $data['email'], $data['phone'] ?? null, $organizationId);
 
             $leadData = [
                 'title'                  => $data['title'],
                 'person_id'              => $person->id,
-                'lead_pipeline_stage_id' => $data['pipeline_stage_id'] ?? $this->getDefaultLeadStageId(), 
+                'lead_pipeline_stage_id' => $data['pipeline_stage_id'] ?? $this->getDefaultLeadStageId(),
                 'lead_type_id'           => $data['lead_type_id'] ?? $this->getTypeIdByName('Novo Negócio'),
                 'lead_source_id'         => $data['lead_source_id'] ?? $this->getSourceIdByName($data['source'] ?? 'Website'),
                 'user_id'                => $this->randomUserId(),
@@ -262,27 +243,8 @@ class WebhookLeadController extends Controller
                 return response()->json(['message' => 'Nome Completo e Email são obrigatórios para leads do Google Ads.'], 400);
             }
 
-            $nameParts = explode(' ', $fullName, 2);
-            $firstName = $nameParts[0];
-            $lastName = $nameParts[1] ?? '';
-
-            $person = $this->personRepository->findOneWhere([
-                ['emails', 'LIKE', '%"value":"' . $email . '"%']
-            ]);
-
-            if (! $person) {
-                $person = $this->personRepository->create([
-                    'emails'          => [['value' => $email, 'label' => 'work']],
-                    'contact_numbers' => $phoneNumber ? [['value' => $phoneNumber, 'label' => 'work']] : [],
-                    'entity_type'     => 'persons'
-                ]);
-            } else {
-                $existingPhones = collect($person->contact_numbers);
-                if ($phoneNumber && ! $existingPhones->contains('value', $phoneNumber)) {
-                    $person->contact_numbers = $existingPhones->push(['value' => $phoneNumber, 'label' => 'work'])->toArray();
-                    $person->save();
-                }
-            }
+            // Encontrar ou Criar Pessoa
+            $person = $this->findOrCreatePerson($fullName, $email, $phoneNumber);
 
             $leadData = [
                 'title'            => 'Google Ads Lead: ' . $fullName,
@@ -290,7 +252,7 @@ class WebhookLeadController extends Controller
                 'lead_stage_id'    => $this->getDefaultLeadStageId(),
                 'lead_pipeline_id' => $this->getDefaultLeadPipelineId(),
                 'person_id'        => $person->id,
-                'user_id'          => $this->randomUserId(),
+                'user_id'          => $this->randomUserId(), // Usa o helper randomUserId()
                 'lead_source_id'   => $this->getSourceIdByName('Google Ads'),
                 'lead_type_id'     => $this->getTypeIdByName('New Business'),
                 'expected_close_date' => now()->addDays(30)->format('Y-m-d'),
@@ -306,7 +268,6 @@ class WebhookLeadController extends Controller
                 ],
             ];
 
-            // Cria o lead
             $lead = $this->leadRepository->create($leadData);
 
             Log::info('Lead do Google Ads criado com sucesso.', ['lead_id' => $lead->id]);
@@ -314,10 +275,84 @@ class WebhookLeadController extends Controller
             return response()->json(['message' => 'Lead do Google Ads criado com sucesso.', 'lead' => $lead], 200);
 
         } catch (\Exception $e) {
-            // Loga mensagem de erro detalhada para o webhook do Google Ads
             Log::error('Erro ao processar o webhook do Google Ads: ' . $e->getMessage() . ' em ' . $e->getFile() . ' na linha ' . $e->getLine());
             return response()->json(['message' => 'Erro ao processar o lead do Google Ads: ' . $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Helper para encontrar ou criar uma pessoa, priorizando a busca por email.
+     *
+     * @param string $name
+     * @param string $email
+     * @param string|null $phone
+     * @param int|null $organizationId
+     * @return \Webkul\Contact\Models\Person
+     */
+    protected function findOrCreatePerson($name, $email, $phone = null, $organizationId = null)
+    {
+        // 1. Tentar encontrar a pessoa pelo email
+        $person = $this->personRepository->findOneWhere([
+            ['emails', 'LIKE', '%"value":"' . $email . '"%']
+        ]);
+
+        // Gerar o unique_id esperado para esta requisição
+        $incomingPersonUniqueId = $this->generatePersonUniqueId($email, $phone);
+
+        if (! $person) {
+            // Se a pessoa NÃO foi encontrada por email, criar uma nova
+            $personData = [
+                'name'            => $name,
+                'emails'          => [['value' => $email, 'label' => 'work']],
+                'contact_numbers' => $phone ? [['value' => $phone, 'label' => 'work']] : [],
+                'organization_id' => $organizationId,
+                'user_id'         => $this->randomUserId(), // Usa o helper randomUserId()
+                'entity_type'     => 'persons',
+                'unique_id'       => $incomingPersonUniqueId, // Define o unique_id explicitamente na criação
+            ];
+            $person = $this->personRepository->create($personData);
+        } else {
+            // Se a pessoa FOI encontrada por email, atualizar seus dados
+            // Atualiza nome se diferente
+            if ($person->name !== $name) {
+                $person->name = $name;
+            }
+
+            // Atualiza emails se o novo email não estiver presente (geralmente não deveria acontecer se encontrado por email)
+            $existingEmails = collect($person->emails);
+            if ($email && ! $existingEmails->contains('value', $email)) {
+                $person->emails = $existingEmails->push(['value' => $email, 'label' => 'work'])->toArray();
+            }
+
+            // Atualiza números de contato se o novo número não estiver presente
+            $existingPhones = collect($person->contact_numbers);
+            if ($phone && ! $existingPhones->contains('value', $phone)) {
+                $person->contact_numbers = $existingPhones->push(['value' => $phone, 'label' => 'work'])->toArray();
+            }
+
+            // Garante que o unique_id do registro existente seja o que esperamos para esta combinação email+phone
+            // Isso é crucial se o unique_id no DB foi gerado de forma diferente antes, ou se o telefone foi adicionado/removido.
+            $person->unique_id = $incomingPersonUniqueId;
+
+            $person->save();
+        }
+
+        return $person;
+    }
+
+    /**
+     * Helper para gerar o unique_id de uma pessoa.
+     * Assume o formato 'email|phone_number'.
+     *
+     * @param string $email
+     * @param string|null $phoneNumber
+     * @return string
+     */
+    protected function generatePersonUniqueId($email, $phoneNumber = null)
+    {
+        // Certifique-se de que o número de telefone é uma string vazia se for null,
+        // para evitar que o unique_id seja 'email|'
+        return $email . '|' . ($phoneNumber ?? '');
     }
 
     /**
@@ -329,6 +364,7 @@ class WebhookLeadController extends Controller
     protected function getDefaultLeadStageId()
     {
         $pipeline = $this->leadRepository->getDefaultPipeline();
+        // Garante que haja um pipeline e estágios antes de tentar acessar
         if ($pipeline && $pipeline->stages->isNotEmpty()) {
             return $pipeline->stages->first()->id;
         }
@@ -358,6 +394,7 @@ class WebhookLeadController extends Controller
     {
         $source = $this->sourceRepository->findOneByField('name', $name);
         if (! $source) {
+            // Cria a fonte se não existir
             try {
                 $source = $this->sourceRepository->create(['name' => $name]);
                 Log::info("Fonte de lead '{$name}' criada automaticamente.");
@@ -379,6 +416,7 @@ class WebhookLeadController extends Controller
     {
         $type = $this->typeRepository->findOneByField('name', $name);
         if (! $type) {
+            // Cria o tipo se não existir
             try {
                 $type = $this->typeRepository->create(['name' => $name]);
                 Log::info("Tipo de lead '{$name}' criado automaticamente.");
@@ -390,8 +428,14 @@ class WebhookLeadController extends Controller
         return $type ? $type->id : null;
     }
 
+    /**
+     * Retorna um ID de usuário aleatório para atribuição padrão.
+     *
+     * @return int|null
+     */
     private function randomUserId()
     {
+        // Tenta encontrar um usuário aleatório. Se não houver usuários, retorna null.
         return User::inRandomOrder()->value('id');
     }
 }
