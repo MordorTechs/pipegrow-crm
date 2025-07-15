@@ -89,6 +89,32 @@
     </style>
 
     {!! view_render_event('admin.layout.head.after') !!}
+
+        <!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-1FCLQXWL8C"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+   gtag('config', 'G-1FCLQXWL8C', {
+      'user_id': "{{ auth()->check() ? auth()->user()->id : 'guest' }}"
+  });
+</script>
+</script>
+@if (session('lead_updated_ga4'))
+    <script>
+        gtag('event', 'lead_status_changed', {
+            'lead_id': '{{ session('lead_updated_ga4.lead_id') }}',
+            'old_stage': '{{ session('lead_updated_ga4.old_stage') }}',
+            'new_stage': '{{ session('lead_updated_ga4.new_stage') }}',
+            'pipeline_name': '{{ session('lead_updated_ga4.pipeline_name') }}',
+            'value': {{ session('lead_updated_ga4.lead_value') ?? 0 }} // Valor do lead
+        });
+    </script>
+    {{ Session::forget('lead_updated_ga4') }}
+@endif
+
 </head>
 
 <body class="h-full font-inter dark:bg-gray-950">

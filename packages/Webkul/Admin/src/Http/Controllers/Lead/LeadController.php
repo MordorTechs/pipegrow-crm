@@ -729,4 +729,25 @@ class LeadController extends Controller
 
         return $leads;
     }
+    
+    public function updateg4(LeadForm $request, $id)
+    {
+        $lead = $this->leadRepository->find($id);
+        $oldStage = $lead->stage->name; 
+
+        $lead = $this->leadRepository->updateg4($request->all(), $id);
+     
+        session()->flash('lead_updated_ga4', [
+            'lead_id'       => $lead->id,
+            'old_stage'     => $oldStage,
+            'new_stage'     => $lead->stage->name,
+            'pipeline_name' => $lead->pipeline->name,
+            'lead_value'    => $lead->lead_value,
+        ]);
+
+        session()->flash('success', trans('admin::app.leads.update-success'));
+
+        return redirect()->route('admin.leads.index');
+    }
+
 }
