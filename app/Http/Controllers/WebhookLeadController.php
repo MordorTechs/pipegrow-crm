@@ -392,6 +392,6 @@ class WebhookLeadController extends Controller
 
     private function randomUserId()
     {
-        return User::value('id')->random();
+        return User::inRandomOrder()->value('id');
     }
 }
