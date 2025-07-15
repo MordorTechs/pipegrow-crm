@@ -11,10 +11,7 @@ use Webkul\Contact\Repositories\OrganizationRepository;
 use Webkul\Attribute\Repositories\AttributeRepository;
 use Webkul\Lead\Repositories\SourceRepository;
 use Webkul\Lead\Repositories\TypeRepository;
-use Webkul\Lead\Models\Lead;
-use Webkul\Contact\Models\Person;
-use Webkul\Contact\Models\Organization;
-use Illuminate\Support\Collection; // Adicionado: Para usar o helper collect()
+use Webkul\User\Models\User;
 
 class WebhookLeadController extends Controller
 {
@@ -101,7 +98,7 @@ class WebhookLeadController extends Controller
             'url' => $request->fullUrl(),
             'method' => $request->method(),
             'headers' => $request->headers->all(),
-            'payload' => $request->all() // Loga o payload completo para depuração
+            'payload' => $request->all()
         ]);
 
         switch ($type) {
@@ -126,7 +123,6 @@ class WebhookLeadController extends Controller
     {
         Log::info('Webhook de leads do site recebido.', $request->all());
 
-        // 1. Defina as regras de validação para os dados do webhook do site
         $validator = Validator::make($request->all(), [
             'title'             => 'required|string|max:255',
             'email'             => 'required|email|max:255',
@@ -138,7 +134,6 @@ class WebhookLeadController extends Controller
             'pipeline_stage_id' => 'nullable|integer|exists:lead_pipeline_stages,id',
             'lead_type_id'      => 'nullable|integer|exists:lead_types,id',
             'lead_source_id'    => 'nullable|integer|exists:lead_sources,id',
-            // Adicione outras regras para campos personalizados do seu CRM
         ]);
 
         if ($validator->fails()) {
@@ -152,12 +147,11 @@ class WebhookLeadController extends Controller
         $data = $validator->validated();
 
         try {
-            // 2. Encontrar ou Criar Organização (Opcional)
             $organizationId = null;
             if (! empty($data['organization_name'])) {
                 $organizationData = [
                     'name'        => $data['organization_name'],
-                    'user_id'     => 1, // Atribua a um usuário padrão (ajuste conforme a lógica de atribuição)
+                    'user_id'     => $this->randomUserId(),
                     'entity_type' => 'organizations'
                 ];
                 $organization = $this->organizationRepository->firstOrCreate(
@@ -167,24 +161,20 @@ class WebhookLeadController extends Controller
                 $organizationId = $organization->id;
             }
 
-            // 3. Encontrar ou Criar Pessoa
-            // Converte para Collection para usar métodos como contains
             $person = $this->personRepository->findOneWhere([['emails', 'LIKE', '%"value":"' . $data['email'] . '"%']]);
 
-            if (! $person) { // Se a pessoa não foi encontrada
+            if (! $person) { 
                 $personData = [
                     'name'            => $data['name'],
                     'emails'          => [['value' => $data['email'], 'label' => 'work']],
                     'contact_numbers' => ! empty($data['phone']) ? [['value' => $data['phone'], 'label' => 'mobile']] : null,
                     'organization_id' => $organizationId,
-                    'user_id'         => 1, // Atribua a um usuário padrão (ajuste conforme a lógica de atribuição)
+                    'user_id'         => $this->randomUserId(),
                     'entity_type'     => 'persons'
                 ];
                 $person = $this->personRepository->create($personData);
             } else {
-                // Se a pessoa já existe, você pode querer atualizar alguns dados
                 $person->name = $data['name'];
-                // Converte para Collection para usar contains e toArray
                 $existingEmails = collect($person->emails);
                 if (!$existingEmails->contains('value', $data['email'])) {
                     $person->emails = $existingEmails->push(['value' => $data['email'], 'label' => 'work'])->toArray();
@@ -197,17 +187,16 @@ class WebhookLeadController extends Controller
                 $person->save();
             }
 
-            // 4. Criar o Lead
             $leadData = [
                 'title'                  => $data['title'],
                 'person_id'              => $person->id,
-                'lead_pipeline_stage_id' => $data['pipeline_stage_id'] ?? $this->getDefaultLeadStageId(), // Usa helper
-                'lead_type_id'           => $data['lead_type_id'] ?? $this->getTypeIdByName('New Business'), // Usa helper
-                'lead_source_id'         => $data['lead_source_id'] ?? $this->getSourceIdByName($data['source'] ?? 'Website'), // Usa helper
-                'user_id'                => 1, // Atribua a um usuário padrão (ajuste conforme a lógica de atribuição)
+                'lead_pipeline_stage_id' => $data['pipeline_stage_id'] ?? $this->getDefaultLeadStageId(), 
+                'lead_type_id'           => $data['lead_type_id'] ?? $this->getTypeIdByName('Novo Negócio'),
+                'lead_source_id'         => $data['lead_source_id'] ?? $this->getSourceIdByName($data['source'] ?? 'Website'),
+                'user_id'                => $this->randomUserId(),
                 'description'            => $data['message'] ?? null,
                 'entity_type'            => 'leads',
-                'expected_close_date'    => now()->addDays(30)->format('Y-m-d'), // Adiciona um valor padrão
+                'expected_close_date'    => now()->addDays(30)->format('Y-m-d'),
             ];
 
             $lead = $this->leadRepository->create($leadData);
@@ -243,10 +232,8 @@ class WebhookLeadController extends Controller
         try {
             $data = $request->json()->all();
 
-            // Loga os dados de entrada para fins de depuração
             Log::info('Google Ads Webhook Data: ' . json_encode($data));
 
-            // Verifica se é um lead de teste do Google Ads
             if (isset($data['is_test']) && $data['is_test']) {
                 Log::info('Recebido um lead de teste do Google Ads. Não criando um lead no CRM.');
                 return response()->json(['message' => 'Lead de teste do Google Ads recebido com sucesso. Nenhum lead criado.'], 200);
@@ -256,7 +243,6 @@ class WebhookLeadController extends Controller
             $email = null;
             $phoneNumber = null;
 
-            // Extrai os dados do array 'user_column_data'
             foreach ($data['user_column_data'] as $column) {
                 switch ($column['column_id']) {
                     case 'FULL_NAME':
@@ -271,33 +257,26 @@ class WebhookLeadController extends Controller
                 }
             }
 
-            // Valida dados essenciais
             if (empty($fullName) || empty($email)) {
                 Log::error('Campos obrigatórios ausentes para o lead do Google Ads: FULL_NAME ou EMAIL.');
                 return response()->json(['message' => 'Nome Completo e Email são obrigatórios para leads do Google Ads.'], 400);
             }
 
-            // Tentativa básica de dividir o nome completo em primeiro e último nome
             $nameParts = explode(' ', $fullName, 2);
             $firstName = $nameParts[0];
             $lastName = $nameParts[1] ?? '';
 
-            // Encontra ou cria pessoa pelo email
             $person = $this->personRepository->findOneWhere([
                 ['emails', 'LIKE', '%"value":"' . $email . '"%']
             ]);
 
             if (! $person) {
-                // Cria nova pessoa se não encontrada
                 $person = $this->personRepository->create([
-                    'name'            => $fullName, // Armazena o nome completo no campo 'name'
                     'emails'          => [['value' => $email, 'label' => 'work']],
                     'contact_numbers' => $phoneNumber ? [['value' => $phoneNumber, 'label' => 'work']] : [],
-                    'user_id'         => 1, // Atribua a um usuário padrão
                     'entity_type'     => 'persons'
                 ]);
             } else {
-                // Converte para Collection para usar contains e toArray
                 $existingPhones = collect($person->contact_numbers);
                 if ($phoneNumber && ! $existingPhones->contains('value', $phoneNumber)) {
                     $person->contact_numbers = $existingPhones->push(['value' => $phoneNumber, 'label' => 'work'])->toArray();
@@ -305,21 +284,18 @@ class WebhookLeadController extends Controller
                 }
             }
 
-            // Prepara os dados do lead com valores extraídos e padrão
             $leadData = [
                 'title'            => 'Google Ads Lead: ' . $fullName,
                 'description'      => 'Lead recebido do Formulário do Google Ads. ID da Campanha: ' . ($data['campaign_id'] ?? 'N/A') . ', ID do Grupo de Anúncios: ' . ($data['adgroup_id'] ?? 'N/A') . ', ID do Criativo: ' . ($data['creative_id'] ?? 'N/A'),
                 'lead_stage_id'    => $this->getDefaultLeadStageId(),
                 'lead_pipeline_id' => $this->getDefaultLeadPipelineId(),
                 'person_id'        => $person->id,
-                // Atribui ao usuário autenticado se disponível, caso contrário, um usuário padrão
-                'user_id'          => auth()->guard('user')->check() ? auth()->guard('user')->user()->id : 1, // Usar 1 como fallback se não autenticado
-                'lead_source_id'   => $this->getSourceIdByName('Google Ads'), // Garante que a fonte 'Google Ads' seja criada ou exista
-                'lead_type_id'     => $this->getTypeIdByName('New Business'), // Garante que o tipo 'New Business' seja criado ou exista
-                'expected_close_date' => now()->addDays(30)->format('Y-m-d'), // Data de fechamento esperada padrão
+                'user_id'          => $this->randomUserId(),
+                'lead_source_id'   => $this->getSourceIdByName('Google Ads'),
+                'lead_type_id'     => $this->getTypeIdByName('New Business'),
+                'expected_close_date' => now()->addDays(30)->format('Y-m-d'),
                 'lead_products'    => [],
-                'entity_type'      => 'leads', // Adicionado: Define a entity_type para o lead
-                // Armazena identificadores específicos do Google Ads como atributos personalizados
+                'entity_type'      => 'leads',
                 'custom_attributes' => [
                     'google_lead_id' => $data['lead_id'] ?? null,
                     'gcl_id'         => $data['gcl_id'] ?? null,
@@ -353,7 +329,6 @@ class WebhookLeadController extends Controller
     protected function getDefaultLeadStageId()
     {
         $pipeline = $this->leadRepository->getDefaultPipeline();
-        // Garante que haja um pipeline e estágios antes de tentar acessar
         if ($pipeline && $pipeline->stages->isNotEmpty()) {
             return $pipeline->stages->first()->id;
         }
@@ -383,7 +358,6 @@ class WebhookLeadController extends Controller
     {
         $source = $this->sourceRepository->findOneByField('name', $name);
         if (! $source) {
-            // Cria a fonte se não existir
             try {
                 $source = $this->sourceRepository->create(['name' => $name]);
                 Log::info("Fonte de lead '{$name}' criada automaticamente.");
@@ -405,7 +379,6 @@ class WebhookLeadController extends Controller
     {
         $type = $this->typeRepository->findOneByField('name', $name);
         if (! $type) {
-            // Cria o tipo se não existir
             try {
                 $type = $this->typeRepository->create(['name' => $name]);
                 Log::info("Tipo de lead '{$name}' criado automaticamente.");
@@ -415,5 +388,10 @@ class WebhookLeadController extends Controller
             }
         }
         return $type ? $type->id : null;
+    }
+
+    private function randomUserId()
+    {
+        return User::value('id')->random();
     }
 }
