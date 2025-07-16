@@ -90,30 +90,50 @@
 
     {!! view_render_event('admin.layout.head.after') !!}
 
-        <!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-1FCLQXWL8C"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-   gtag('config', 'G-1FCLQXWL8C', {
-      'user_id': "{{ auth()->check() ? auth()->user()->id : 'guest' }}"
-  });
-</script>
-</script>
-@if (session('lead_updated_ga4'))
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-1FCLQXWL8C"></script>
     <script>
-        gtag('event', 'lead_status_changed', {
-            'lead_id': '{{ session('lead_updated_ga4.lead_id') }}',
-            'old_stage': '{{ session('lead_updated_ga4.old_stage') }}',
-            'new_stage': '{{ session('lead_updated_ga4.new_stage') }}',
-            'pipeline_name': '{{ session('lead_updated_ga4.pipeline_name') }}',
-            'value': {{ session('lead_updated_ga4.lead_value') ?? 0 }} // Valor do lead
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+
+        gtag('config', 'G-1FCLQXWL8C', {
+            'user_id': "{{ auth()->check() ? auth()->user()->id : 'guest' }}"
         });
+
+        // Define user properties if the user is authenticated
+        @auth
+            gtag('set', 'user_properties', {
+                user_role: "{{ auth()->user()->role->name ?? 'N/A' }}", // Example: 'admin', 'sales'
+                user_group: "{{ auth()->user()->group->name ?? 'N/A' }}" // Example: 'default', 'premium'
+                // Add other relevant user properties here
+            });
+        @endauth
     </script>
-    {{ Session::forget('lead_updated_ga4') }}
-@endif
+
+    @if (session('lead_updated_ga4'))
+        <script>
+            gtag('event', 'lead_status_changed', {
+                'lead_id': '{{ session('lead_updated_ga4.lead_id') }}',
+                'old_stage': '{{ session('lead_updated_ga4.old_stage') }}',
+                'new_stage': '{{ session('lead_updated_ga4.new_stage') }}',
+                'pipeline_name': '{{ session('lead_updated_ga4.pipeline_name') }}',
+                'value': {{ session('lead_updated_ga4.lead_value') ?? 0 }} // Valor do lead
+            });
+        </script>
+        {{ Session::forget('lead_updated_ga4') }}
+    @endif
+
+    {{-- GA4 Login Event --}}
+    @if (session('user_logged_in_ga4'))
+        <script>
+            gtag('event', 'login', {
+                'method': 'email_password', // Or 'sso', 'oauth', etc.
+                'user_id': "{{ auth()->check() ? auth()->user()->id : 'guest' }}"
+            });
+        </script>
+        {{ Session::forget('user_logged_in_ga4') }}
+    @endif
 
 </head>
 

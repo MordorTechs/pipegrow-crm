@@ -7,6 +7,8 @@ use Illuminate\Support\Collection;
 use Illuminate\View\View;
 use Webkul\Admin\Http\Controllers\Controller;
 use Webkul\Core\Menu\MenuItem;
+use Illuminate\Support\Facades\Auth; // Adicionado para usar Auth::attempt
+use Illuminate\Support\Facades\Session; // Adicionado para usar Session::flash
 
 class SessionController extends Controller
 {
@@ -40,11 +42,15 @@ class SessionController extends Controller
             'password' => 'required',
         ]);
 
-        if (! auth()->guard('user')->attempt(request(['email', 'password']), request('remember'))) {
+        if (! Auth::guard('user')->attempt(request(['email', 'password']), request('remember'))) {
             session()->flash('error', trans('admin::app.users.login-error'));
 
             return redirect()->back();
         }
+
+        // Autenticação bem-sucedida
+        // Adicione esta linha para disparar o evento GA4 na próxima requisição
+        Session::flash('user_logged_in_ga4', true);
 
         if (auth()->guard('user')->user()->status == 0) {
             session()->flash('warning', trans('admin::app.users.activate-warning'));
