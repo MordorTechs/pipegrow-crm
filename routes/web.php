@@ -16,3 +16,6 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', function () {
     return view('welcome');
 });
+
+Route::get('/facebook/callback', [App\Http\Controllers\FacebookAuthController::class, 'callback']);
+Route::get('/facebook/redirect/auth', [App\Http\Controllers\FacebookAuthController::class, 'redirectAuth'])->name('integration.facebook_ads');

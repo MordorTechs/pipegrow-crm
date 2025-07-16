@@ -269,7 +269,16 @@ return [
         'route'      => 'admin.settings.data_transfer.imports.index',
         'sort'       => 4,
         'icon-class' => 'icon-download',
-    ], [
+    ],
+    [
+        'key'        => 'settings.automation.facebook_integration',
+        'name'       => 'Integração Facebook Ads',
+        'info'       => 'Receber Leads do facebook',
+        'route'      => 'integration.facebook_ads',
+        'sort'       => 4,
+        'icon-class' => 'icon-settings-sources',
+    ],
+     [
         'key'        => 'settings.other_settings',
         'name'       => 'admin::app.layouts.other-settings',
         'info'       => 'admin::app.layouts.other-settings-info',
