@@ -27,9 +27,13 @@ class FacebookAuthController
         }
 
         $data = $response->json();
+        $data['state'] = $request->input('state');
         $accessToken = $data['access_token'];
 
-        
+        $responseToken = Http::get('GET https://graph.facebook.com/v19.0/me/accounts?access_token='.$accessToken);
+        \Log::info($data);
+        \Log::info($responseToken);
+        return redirect(route('admin.settings.index'));
     }
 
     public function redirectAuth()
