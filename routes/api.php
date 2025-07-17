@@ -31,3 +31,8 @@ Route::post('webhook/leads', [WebhookLeadController::class, 'handleSiteLead']);
 // Novo endpoint para leads do Google Ads (URL: /api/webhook/leads/google-ads)
 Route::post('webhook/leads/google-ads', [WebhookLeadController::class, 'handleGoogleAdsLead']);
 
+// Rota para verificação do webhook do Facebook (GET)
+Route::get('/webhook/facebook', [FacebookWebhookController::class, 'verify']);
+
+// Rota para lidar com os eventos do webhook do Facebook (POST)
+Route::post('/webhook/facebook', [FacebookWebhookController::class, 'handle']);
