@@ -15,7 +15,7 @@ class FacebookAuthController
 
         $code = $request->input('code');
 
-        $response = Http::get('https://graph.facebook.com/v19.0/oauth/access_token', [
+        $response = Http::get('https://graph.facebook.com/v23.0/oauth/access_token', [
             'client_id' => env('FACEBOOK_CLIENT_ID'),
             'client_secret' => env('FACEBOOK_CLIENT_SECRET'),
             'redirect_uri' => env('FACEBOOK_REDIRECT_URI'),
@@ -34,8 +34,7 @@ class FacebookAuthController
             'access_token' => $accessToken,
         ]);
 
-        \Log::info($data);
-        \Log::info($responseToken);
+
         return redirect(route('admin.settings.index'));
     }
 
