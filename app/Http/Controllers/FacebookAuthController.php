@@ -24,7 +24,7 @@ class FacebookAuthController
         ]);
 
         if ($response->failed()) {
-            return response('Erro ao trocar o código por token.', 500);
+            return view('integration.facebook-ads-redirect-500-error');
         }
 
         $data = $response->json();
