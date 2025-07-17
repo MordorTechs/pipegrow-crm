@@ -46,12 +46,14 @@ class FacebookAuthController
 
         $bigToken = json_decode($responseBigToken, true);
 
-        $metaAdsTokens = MetaAdsTokens::create([
-            'app_url_customer' => $data['state'],
-            'access_token' => $bigToken['data']['access_token'],
-            'page_id' => $bigToken['data']['id'],
-            'page_name' => $bigToken['data']['name'],
-        ]);
+        foreach ($bigToken['data'] as $page) {
+            $metaAdsTokens = MetaAdsTokens::create([
+                'app_url_customer' => $data['state'],
+                'access_token' => $page['access_token'],
+                'page_id' => $page['id'],
+                'page_name' => $page['name'],
+            ]);
+        }
 
         if ($metaAdsTokens) {
             return view('integration.facebook-ads-redirect-app-customer')->with('app_url', $data['state']);
