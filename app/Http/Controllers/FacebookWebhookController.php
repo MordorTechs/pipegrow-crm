@@ -49,7 +49,9 @@ class FacebookWebhookController extends Controller
         if (isset($data['object']) && $data['object'] === 'page') {
             foreach ($data['entry'] as $entry) {
                 foreach ($entry['changes'] as $change) {
-                    if ($change['field'] === 'leadgen' && $change['value']['item'] === 'leadgen') {
+                    // Verifica se o campo é 'leadgen' e se 'leadgen_id' existe no valor
+                    // A chave 'item' não é sempre presente e não é necessária aqui.
+                    if ($change['field'] === 'leadgen' && isset($change['value']['leadgen_id'])) {
                         $leadgenId = $change['value']['leadgen_id'];
                         $pageId = $change['value']['page_id'];
 
