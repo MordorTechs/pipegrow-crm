@@ -44,9 +44,15 @@ class FacebookAuthController
             'access_token' => $token['access_token']
         ]);
 
+        
         $bigToken = json_decode($responseBigToken, true);
-
+        
         foreach ($bigToken['data'] as $page) {
+
+            $subsResponse = Http::get('https://graph.facebook.com/v23.0/'.$page['id'].'/subscribed_apps', [
+                'access_token' => $page['access_token']
+            ]);
+            \Log::info($subsResponse);
             $metaAdsTokens = MetaAdsTokens::create([
                 'app_url_customer' => $data['state'],
                 'access_token' => $page['access_token'],
