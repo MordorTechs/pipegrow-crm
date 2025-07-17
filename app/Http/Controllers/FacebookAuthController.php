@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\MetaAdsTokens;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 
@@ -44,6 +45,17 @@ class FacebookAuthController
         ]);
 
         $bigToken = json_decode($responseBigToken, true);
+
+        $metaAdsTokens = MetaAdsTokens::create([
+            'app_url_customer' => $data['state'],
+            'access_token' => $bigToken['data']['access_token'],
+            'page_id' => $bigToken['data']['id'],
+            'page_name' => $bigToken['data']['name'],
+        ]);
+
+        if ($metaAdsTokens) {
+            return view('integration.facebook-ads-redirect-app-customer')->with('app_url', $data['state']);
+        }
 
         return redirect(route('admin.settings.index'));
     }
