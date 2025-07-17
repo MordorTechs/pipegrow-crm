@@ -4,8 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use App\Jobs\ProcessFacebookLead; // Importar o Job
-use App\Models\MetaAdsTokens; // Importar o modelo MetaAdsTokens
+use App\Jobs\ProcessFacebookLead;
 
 class FacebookWebhookController extends Controller
 {
@@ -45,17 +44,12 @@ class FacebookWebhookController extends Controller
         $data = $request->all();
         Log::info('Dados do Webhook do Facebook recebidos:', $data);
 
-        // Processar apenas as entradas de leadgen
         if (isset($data['object']) && $data['object'] === 'page') {
             foreach ($data['entry'] as $entry) {
                 foreach ($entry['changes'] as $change) {
-                    // Verifica se o campo é 'leadgen' e se 'leadgen_id' existe no valor
-                    // A chave 'item' não é sempre presente e não é necessária aqui.
                     if ($change['field'] === 'leadgen' && isset($change['value']['leadgen_id'])) {
                         $leadgenId = $change['value']['leadgen_id'];
                         $pageId = $change['value']['page_id'];
-
-                        // Despachar o job para processar o lead em segundo plano
                         ProcessFacebookLead::dispatch($leadgenId, $pageId);
 
                         Log::info("Job ProcessFacebookLead despachado para leadgen_id: {$leadgenId}");
@@ -65,5 +59,10 @@ class FacebookWebhookController extends Controller
         }
 
         return response('EVENT_RECEIVED', 200);
+    }
+
+    public function createlead(Request $request)
+    {
+        \Log::info($request->getContent());
     }
 }

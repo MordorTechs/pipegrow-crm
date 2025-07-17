@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use Illuminate\Support\Facades\Http;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -53,15 +54,10 @@ class ProcessFacebookLead implements ShouldQueue
      * @param \Webkul\Contact\Repositories\OrganizationRepository $organizationRepository
      * @return void
      */
-    public function handle(
-        LeadRepository $leadRepository,
-        PersonRepository $personRepository,
-        OrganizationRepository $organizationRepository
-    ) {
+    public function handle() {
         Log::info("Processando lead do Facebook: {$this->leadgenId} para a página: {$this->pageId}");
 
         try {
-            // 1. Obter o token de acesso da Meta Ads
             $metaAdsToken = MetaAdsTokens::where('page_id', $this->pageId)->first();
 
             if (! $metaAdsToken) {
@@ -70,8 +66,7 @@ class ProcessFacebookLead implements ShouldQueue
             }
 
             $accessToken = $metaAdsToken->access_token;
-
-            // 2. Consultar os detalhes do lead usando a API Graph do Facebook
+        
             $graphApiUrl = "https://graph.facebook.com/v19.0/{$this->leadgenId}?access_token={$accessToken}";
 
             $response = file_get_contents($graphApiUrl);
@@ -84,31 +79,8 @@ class ProcessFacebookLead implements ShouldQueue
 
             $mappedData = $this->mapFacebookLeadData($leadData['field_data']);
 
-            // 3. Criar ou atualizar a pessoa
-            $person = $personRepository->firstOrCreate([
-                'emails' => [['value' => $mappedData['email'], 'label' => 'work']]
-            ], [
-                'name' => $mappedData['full_name'],
-                'emails' => [['value' => $mappedData['email'], 'label' => 'work']],
-                'contact_numbers' => [['value' => $mappedData['phone_number'], 'label' => 'work']],
-                'organization_id' => null, // Pode ser preenchido se houver lógica para organizações
-                'lead_owner_id' => $metaAdsToken->user_id, // Atribuir ao usuário que configurou a integração
-            ]);
-
-            // 4. Criar um novo lead no CRM
-            $lead = $leadRepository->create([
-                'title' => 'Lead do Facebook: ' . $mappedData['full_name'],
-                'lead_pipeline_id' => 1, // Substitua pelo ID do pipeline padrão ou configure dinamicamente
-                'lead_stage_id' => 1,    // Substitua pelo ID do estágio padrão ou configure dinamicamente
-                'lead_source_id' => $this->getFacebookLeadSourceId(), // Obter ID da fonte "Facebook"
-                'person_id' => $person->id,
-                'user_id' => $metaAdsToken->user_id, // Atribuir ao usuário que configurou a integração
-                'expected_close_date' => now()->addDays(7), // Exemplo: 7 dias a partir de agora
-                'lead_value' => 0, // Pode ser atualizado se o Facebook fornecer valor
-                'description' => $mappedData['message'] ?? 'Lead gerado via Facebook Ads.',
-            ]);
-
-            Log::info("Lead do Facebook criado com sucesso: {$lead->id}", ['lead_data' => $mappedData]);
+            $url = 'https://'.$metaAdsToken->app_url_customer;
+            $sendLead = Http::post($url, $mappedData);
 
         } catch (Exception $e) {
             Log::error("Erro ao processar lead do Facebook: {$e->getMessage()}", [
@@ -148,7 +120,6 @@ class ProcessFacebookLead implements ShouldQueue
                 case 'message':
                     $mapped['message'] = $field['values'][0] ?? '';
                     break;
-                // Adicione outros campos conforme necessário para mapeamento
             }
         }
 
@@ -167,7 +138,6 @@ class ProcessFacebookLead implements ShouldQueue
 
         $facebookSource = $sourceRepository->firstOrCreate(
             ['name' => 'Facebook Ads'],
-            ['name' => 'Facebook Ads']
         );
 
         return $facebookSource->id;

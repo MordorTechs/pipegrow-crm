@@ -36,3 +36,5 @@ Route::get('/webhook/facebook', [FacebookWebhookController::class, 'verifyWebhoo
 
 // Rota para lidar com os eventos do webhook do Facebook
 Route::post('/webhook/facebook', [FacebookWebhookController::class, 'handleWebhook']);
+
+Route::post('/webhook/facebook/create-lead', [FacebookWebhookController::class, 'createlead']);
