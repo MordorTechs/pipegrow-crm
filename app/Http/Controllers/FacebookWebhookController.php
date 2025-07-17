@@ -5,9 +5,26 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use App\Jobs\ProcessFacebookLead;
+use Webkul\Lead\Repositories\LeadRepository;
+use Webkul\Contact\Repositories\PersonRepository;
+use Webkul\Contact\Repositories\OrganizationRepository;
+use Webkul\User\Models\User;
 
 class FacebookWebhookController extends Controller
 {
+    public $organizationRepository;
+    public $personRepository;
+    public $leadRepository;
+
+    public function __construct(
+        LeadRepository $leadRepository,
+        PersonRepository $personRepository,
+        OrganizationRepository $organizationRepository) 
+    {
+        $this->leadRepository = $leadRepository;
+        $this->personRepository = $personRepository;
+        $this->organizationRepository = $organizationRepository;
+    }
     /**
      * Lida com a verificação do webhook do Facebook.
      *
@@ -64,5 +81,38 @@ class FacebookWebhookController extends Controller
     public function createlead(Request $request)
     {
         \Log::info($request->getContent());
+
+        $lead = $request->getContent();
+
+        $existingPerson = $this->personRepository->whereJsonContains('emails', [['value' => $lead['email'], 'label' => 'work']])->first();
+
+        $data = [
+            'name' => $lead['full_name'],
+            'emails' => [['value' => $lead['email'], 'label' => 'work']],
+            'contact_numbers' => [['value' => $lead['phone_number'], 'label' => 'work']],
+            'organization_id' => null,
+            'lead_owner_id' => User::inRandomOrder()->value('id'),
+        ];
+
+        if ($existingPerson) {
+            $existingPerson->update($data);
+            $person = $existingPerson;
+        } else {
+            $person = $this->personRepository->create($data);
+        }
+
+
+        $lead = $this->leadRepository->create([
+            'title' => 'Lead do Facebook: ' . $lead['full_name'],
+            'lead_pipeline_id' => 1,
+            'lead_stage_id' => 1,
+            'lead_source_id' => $this->getFacebookLeadSourceId(),
+            'person_id' => $person->id,
+            'user_id' => null,
+            'expected_close_date' => now()->addDays(7),
+            'lead_value' => 0,
+            'description' => $lead['message'] ?? 'Lead gerado via Facebook Ads.',
+            'lead_type_id' => 1,
+        ]);
     }
 }
