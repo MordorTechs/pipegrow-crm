@@ -65,20 +65,7 @@ class FacebookWebhookController extends Controller
      */
     public function handle(Request $request)
     {
-        // Log o payload completo para depuração
         Log::info('Facebook Webhook Event Received:', $request->all());
-
-        // Implemente sua lógica de processamento de webhook aqui.
-        // Por exemplo, você pode querer verificar a assinatura da requisição
-        // para garantir que ela vem do Facebook e então processar os dados.
-
-        // Exemplo de como acessar dados do payload:
-        // $entry = $request->input('entry');
-        // foreach ($entry as $data) {
-        //     // Processar cada entrada de dados
-        // }
-
-        // Retorna uma resposta 200 OK para o Facebook para indicar que o webhook foi recebido
         return response('EVENT_RECEIVED', 200);
     }
 }
