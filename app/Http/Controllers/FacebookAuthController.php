@@ -30,10 +30,20 @@ class FacebookAuthController
         $data['state'] = $request->input('state');
         $accessToken = $data['access_token'];
 
-        $responseToken = Http::get('https://graph.facebook.com/v19.0/me/accounts', [
-            'access_token' => $accessToken,
+        $responseToken = Http::get('https://graph.facebook.com/v23.0/oauth/access_token', [
+            'grant_type' => 'fb_exchange_token',
+            'client_id' => env('FACEBOOK_CLIENT_ID'),
+            'client_secret' => env('FACEBOOK_CLIENT_SECRET'),
+            'fb_exchange_token' => $accessToken,
         ]);
 
+        $token = json_decode($responseToken, true);
+        
+        $responseBigToken = Http::get('https://graph.facebook.com/v19.0/me/accounts', [
+            'access_token' => $token['access_token']
+        ]);
+
+        $bigToken = json_decode($responseBigToken, true);
 
         return redirect(route('admin.settings.index'));
     }
