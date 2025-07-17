@@ -3,69 +3,65 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log; // Importar a classe Log para depuração
+use Illuminate\Support\Facades\Log;
+use App\Jobs\ProcessFacebookLead; // Importar o Job
+use App\Models\MetaAdsTokens; // Importar o modelo MetaAdsTokens
 
 class FacebookWebhookController extends Controller
 {
     /**
-     * Handle Facebook Webhook verification requests.
+     * Lida com a verificação do webhook do Facebook.
      *
-     * @param  \Illuminate\Http\Request  $request
+     * @param \Illuminate\Http\Request $request
      * @return \Illuminate\Http\Response
      */
-    public function verify(Request $request)
+    public function verifyWebhook(Request $request)
     {
-        // Token de verificação que você definiu no Painel de Aplicativos do Facebook
-        // É ALTAMENTE RECOMENDADO armazenar este token em seu arquivo .env
-        // Exemplo: FACEBOOK_WEBHOOK_VERIFY_TOKEN="seu_token_secreto_aqui"
         $verifyToken = env('FACEBOOK_WEBHOOK_VERIFY_TOKEN');
+        $mode = $request->input('hub_mode');
+        $token = $request->input('hub_verify_token');
+        $challenge = $request->input('hub_challenge');
 
-        // Obter parâmetros da string de consulta.
-        // O PHP converte automaticamente 'hub.mode' para 'hub_mode', etc.
-        $mode = $request->query('hub_mode');
-        $token = $request->query('hub_verify_token');
-        $challenge = $request->query('hub_challenge');
-
-        // Log para depuração para ver os valores recebidos
-        Log::info('Facebook Webhook Verification Request:', [
-            'hub_mode'        => $mode,
-            'hub_verify_token' => $token,
-            'hub_challenge'   => $challenge,
-        ]);
-
-        // Verificar se o modo é 'subscribe' e o token corresponde
         if ($mode && $token) {
             if ($mode === 'subscribe' && $token === $verifyToken) {
-                // Sucesso na verificação, retorna o desafio
-                Log::info('Facebook Webhook Verified Successfully.');
+                Log::info('Webhook verificado com sucesso!');
                 return response($challenge, 200);
             } else {
-                // Token ou modo inválido
-                Log::warning('Facebook Webhook Verification Failed: Invalid token or mode.', [
-                    'expected_token' => $verifyToken,
-                    'received_token' => $token,
-                    'received_mode'  => $mode,
-                ]);
-                return response('Forbidden', 403);
+                return response('Token de verificação incorreto', 403);
             }
         }
 
-        // Requisição inválida se os parâmetros não estiverem presentes
-        Log::error('Facebook Webhook Verification Failed: Missing parameters.');
-        return response('Bad Request', 400);
+        return response('Parâmetros ausentes', 400);
     }
 
     /**
-     * Handle incoming Facebook Webhook events.
-     * This method will receive the actual event data from Facebook.
-     * You will need to implement the logic to process the webhook payload here.
+     * Lida com os dados recebidos do webhook do Facebook.
      *
-     * @param  \Illuminate\Http\Request  $request
+     * @param \Illuminate\Http\Request $request
      * @return \Illuminate\Http\Response
      */
-    public function handle(Request $request)
+    public function handleWebhook(Request $request)
     {
-        Log::info('Facebook Webhook Event Received:', $request->all());
+        $data = $request->all();
+        Log::info('Dados do Webhook do Facebook recebidos:', $data);
+
+        // Processar apenas as entradas de leadgen
+        if (isset($data['object']) && $data['object'] === 'page') {
+            foreach ($data['entry'] as $entry) {
+                foreach ($entry['changes'] as $change) {
+                    if ($change['field'] === 'leadgen' && $change['value']['item'] === 'leadgen') {
+                        $leadgenId = $change['value']['leadgen_id'];
+                        $pageId = $change['value']['page_id'];
+
+                        // Despachar o job para processar o lead em segundo plano
+                        ProcessFacebookLead::dispatch($leadgenId, $pageId);
+
+                        Log::info("Job ProcessFacebookLead despachado para leadgen_id: {$leadgenId}");
+                    }
+                }
+            }
+        }
+
         return response('EVENT_RECEIVED', 200);
     }
 }
