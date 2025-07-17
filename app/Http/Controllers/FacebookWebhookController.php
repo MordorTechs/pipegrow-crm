@@ -80,9 +80,7 @@ class FacebookWebhookController extends Controller
 
     public function createlead(Request $request)
     {
-        \Log::info($request->getContent());
-
-        $lead = $request->getContent();
+        $lead = json_decode($request->getContent(), true); 
 
         $existingPerson = $this->personRepository->whereJsonContains('emails', [['value' => $lead['email'], 'label' => 'work']])->first();
 
@@ -114,5 +112,22 @@ class FacebookWebhookController extends Controller
             'description' => $lead['message'] ?? 'Lead gerado via Facebook Ads.',
             'lead_type_id' => 1,
         ]);
+    }
+
+    /**
+     * Obtém o ID da fonte "Facebook" do banco de dados.
+     * Se não existir, cria uma nova.
+     *
+     * @return int
+     */
+    protected function getFacebookLeadSourceId(): int
+    {
+        $sourceRepository = app('Webkul\Lead\Repositories\SourceRepository');
+
+        $facebookSource = $sourceRepository->firstOrCreate(
+            ['name' => 'Facebook Ads'],
+        );
+
+        return $facebookSource->id;
     }
 }

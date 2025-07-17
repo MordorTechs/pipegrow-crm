@@ -107,18 +107,24 @@ class ProcessFacebookLead implements ShouldQueue
         foreach ($fieldData as $field) {
             switch ($field['name']) {
                 case 'full_name':
+                case 'nome_completo':
                     $mapped['full_name'] = $field['values'][0] ?? '';
                     break;
+
                 case 'email':
                     $mapped['email'] = $field['values'][0] ?? '';
                     break;
+
+                case 'telefone':
                 case 'phone_number':
                     $mapped['phone_number'] = $field['values'][0] ?? '';
                     break;
+
                 case 'message':
                     $mapped['message'] = $field['values'][0] ?? '';
                     break;
             }
+
         }
 
         return $mapped;
