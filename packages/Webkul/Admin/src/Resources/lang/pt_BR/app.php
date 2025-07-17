@@ -18,7 +18,7 @@ return [
         'organizations'   => 'Empresas',
         'products'        => 'Produtos',
         'settings'        => 'Configurações',
-        'groups'          => 'Grupos',
+        'groups'          => 'Equipes',
         'roles'           => 'Funções',
         'users'           => 'Usuários',
         'user'            => 'Usuário',
@@ -745,11 +745,11 @@ return [
 
         'groups' => [
             'index' => [
-                'create-btn'                     => 'Criar Grupo',
-                'title'                          => 'Grupos',
-                'create-success'                 => 'Grupo criado com sucesso.',
-                'update-success'                 => 'Grupo atualizado com sucesso.',
-                'destroy-success'                => 'Grupo excluído com sucesso.',
+                'create-btn'                     => 'Criar Equipe',
+                'title'                          => 'Equipes',
+                'create-success'                 => 'Equipe criado com sucesso.',
+                'update-success'                 => 'Equipe atualizado com sucesso.',
+                'destroy-success'                => 'Equipe excluído com sucesso.',
                 'delete-failed'                  => 'Não foi possível excluir o grupo.',
                 'delete-failed-associated-users' => 'Não foi possível excluir o grupo, pois está sendo utilizado por usuários.',
 
@@ -762,14 +762,14 @@ return [
                 ],
 
                 'edit' => [
-                    'title' => 'Editar Grupo',
+                    'title' => 'Editar Equipe',
                 ],
 
                 'create' => [
                     'name'        => 'Nome',
-                    'title'       => 'Adicionar Grupo',
+                    'title'       => 'Adicionar Equipe',
                     'description' => 'Descrição',
-                    'save-btn'    => 'Salvar Grupo',
+                    'save-btn'    => 'Salvar Equipe',
                 ],
             ],
         ],
@@ -1247,7 +1247,7 @@ return [
                     'email'            => 'E-mail',
                     'general'          => 'Geral',
                     'global'           => 'Global',
-                    'group'            => 'Grupo',
+                    'group'            => 'Equipe',
                     'individual'       => 'Individual',
                     'name'             => 'Nome',
                     'password'         => 'Senha',
@@ -2191,8 +2191,8 @@ return [
         'settings'             => 'Configurações',
         'user'                 => 'Usuário',
         'user-info'            => 'Gerencie todos os seus usuários e suas permissões no CRM, o que eles estão autorizados a fazer.',
-        'groups'               => 'Grupos',
-        'groups-info'          => 'Adicionar, editar ou excluir grupos do CRM',
+        'groups'               => 'Equipes',
+        'groups-info'          => 'Adicionar, editar ou excluir equipe do CRM',
         'roles'                => 'Funções',
         'role'                 => 'Função',
         'roles-info'           => 'Adicionar, editar ou excluir funções do CRM',
