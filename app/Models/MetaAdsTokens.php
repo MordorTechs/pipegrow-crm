@@ -10,8 +10,6 @@ class MetaAdsTokens extends Model
 
     protected $primaryKey = 'id';
 
-    public $timestamps = false;
-
     protected $fillable = [
         'app_url_customer',
         'access_token',
