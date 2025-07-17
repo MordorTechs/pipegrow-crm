@@ -65,8 +65,6 @@ class FacebookAuthController
         if ($metaAdsTokens) {
             return view('integration.facebook-ads-redirect-app-customer')->with('app_url', $data['state']);
         }
-
-        return redirect(route('admin.settings.index'));
     }
 
     public function redirectAuth()
