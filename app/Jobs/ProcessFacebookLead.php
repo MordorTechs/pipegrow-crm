@@ -9,9 +9,6 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use App\Models\MetaAdsTokens;
-use Webkul\Lead\Repositories\LeadRepository;
-use Webkul\Contact\Repositories\PersonRepository;
-use Webkul\Contact\Repositories\OrganizationRepository;
 use Exception;
 use Illuminate\Support\Facades\Log;
 
@@ -54,7 +51,8 @@ class ProcessFacebookLead implements ShouldQueue
      * @param \Webkul\Contact\Repositories\OrganizationRepository $organizationRepository
      * @return void
      */
-    public function handle() {
+    public function handle() 
+    {
         Log::info("Processando lead do Facebook: {$this->leadgenId} para a página: {$this->pageId}");
 
         try {
@@ -79,7 +77,7 @@ class ProcessFacebookLead implements ShouldQueue
 
             $mappedData = $this->mapFacebookLeadData($leadData['field_data']);
 
-            $url = 'https://'.$metaAdsToken->app_url_customer;
+            $url = 'https://'.$metaAdsToken->app_url_customer.'/api/webhook/facebook/create-lead';
             $sendLead = Http::post($url, $mappedData);
 
         } catch (Exception $e) {
