@@ -40,6 +40,9 @@
             }}
         "
     >
+    <meta
+        name="facebook-domain-verification"
+        content="xlw94z98d2zt6t7gvwdo76v11l7ytg"/>
 
     @stack('meta')
 
