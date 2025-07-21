@@ -104,26 +104,30 @@ class ProcessWhatsappMessage implements ShouldQueue
             $extractedContactCompany = ($geminiResponse['contact_company'] ?? '') === '' || ($geminiResponse['contact_company'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_company'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_company'];
             
             // --- Determine os dados mais atualizados da pessoa (priorizando extração do Gemini e payload) ---
+            // Estes serão os dados que usaremos para a lógica de estado e para criar/atualizar a Pessoa/Lead
             $currentPersonName = optional($person)->name;
             $currentPersonCompany = optional(optional($person)->organization)->name;
             $currentPersonEmail = (json_decode(optional($person)->emails, true)[0]['value'] ?? null);
 
-            // Prioriza o nome extraído do Gemini
+            // Prioriza o nome extraído do Gemini, se for válido e mais específico
             if (!empty($extractedContactName)) {
                 $currentPersonName = $extractedContactName;
             } 
-            // Se o Gemini não extraiu, tenta usar o nome do payload do WhatsApp, se não for genérico
-            elseif (!empty($initialContactName) && !str_starts_with($initialContactName, 'Cliente WhatsApp ')) {
-                $currentPersonName = $initialContactName;
+            // Se o Gemini não extraiu um nome válido, mas o initialContactName não é um placeholder, usa o initialContactName
+            elseif (empty($currentPersonName) || str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
+                if (!empty($initialContactName) && !str_starts_with($initialContactName, 'Cliente WhatsApp ')) {
+                    $currentPersonName = $initialContactName;
+                } else {
+                    $currentPersonName = null; // Garante que é null se for um placeholder
+                }
             }
 
-
-            // Prioriza a empresa extraída do Gemini
+            // Prioriza a empresa extraída do Gemini, se for válida e mais específica
             if (!empty($extractedContactCompany)) {
                 $currentPersonCompany = $extractedContactCompany;
             }
 
-            // Prioriza o email extraído do Gemini
+            // Prioriza o email extraído do Gemini, se for válido e mais específico
             if (!empty($extractedContactEmail)) {
                 $currentPersonEmail = $extractedContactEmail;
             }
@@ -136,7 +140,7 @@ class ProcessWhatsappMessage implements ShouldQueue
             // Define o texto de pré-atendimento e o próximo estado
             if ($conversationState === 'initial_greeting') {
                 $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM.";
-                // Se já temos um nome razoável, pula para perguntar a empresa
+                // Verifica se já temos um nome válido para pular a pergunta do nome
                 if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
                     $nextState = 'awaiting_company';
                     $preAttendanceText .= " Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
@@ -243,7 +247,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 // Tenta encontrar o lead para logar corretamente
                 $lead = Lead::where('person_id', optional($person)->id)->first();
             } else {
-                // Estado desconhecido (fallback), volta para a saudação inicial
+                // Fallback para estado desconhecido, volta para a saudação inicial
                 $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM. Qual é o seu nome completo?";
                 $nextState = 'awaiting_name';
             }
@@ -405,7 +409,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         }
         ";
 
-        // Constrói o array 'contents' para a API do Gemini
+        // Constrói o array 'contents' para o API do Gemini
         // Adiciona a instrução do sistema como o primeiro turno 'user' se o histórico estiver vazio ou se a instrução mudou
         if (empty($conversationHistory) || !isset($conversationHistory[0]['parts'][0]['text']) || $conversationHistory[0]['parts'][0]['text'] !== $systemInstructionText) {
             array_unshift($conversationHistory, ['role' => 'user', 'parts' => [['text' => $systemInstructionText]]]);
