@@ -71,39 +71,24 @@ class ProcessWhatsappMessage implements ShouldQueue
             $from = $this->formatBrazilianPhoneNumber($from);
             Log::info('Número de telefone formatado:', ['original' => $originalFrom, 'formatted' => $from]);
 
-            // --- 2. Tente encontrar ou criar uma pessoa (contato) ANTES de chamar o Gemini ---
-            $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
-            $knownContactNameForGemini = 'A ser qualificado';
-            $knownContactEmailForGemini = 'A ser qualificado';
-            $conversationHistory = []; // Inicializa o histórico de conversa
-
-            if ($person) {
-                $knownContactNameForGemini = $person->name;
-                $emails = json_decode($person->emails, true) ?? [];
-                if (!empty($emails)) {
-                    $knownContactEmailForGemini = $emails[0]['value']; // Pega o primeiro email conhecido
-                }
-                // Carrega o histórico de conversa existente
-                $conversationHistory = json_decode($person->conversation_history ?? '[]', true);
-                Log::info('Pessoa existente encontrada para Gemini context:', ['name' => $person->name, 'email' => $knownContactEmailForGemini, 'history_length' => count($conversationHistory)]);
-            } else {
-                Log::info('Pessoa não encontrada, Gemini irá começar a qualificação do zero.');
-            }
-
+            // --- Extrair nome do contato do payload do webhook (se disponível) ---
+            $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
+            
             // --- 1. Pré-atendimento com Gemini 2.5 ---
-            // Passa o nome, email e o histórico de conversa para o Gemini
-            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $conversationHistory);
+            // Nao passamos mais o historico ou nome/email conhecidos, apenas a mensagem atual.
+            $geminiResponse = $this->callGeminiAPI($text);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
-            // Usar o nome do Gemini se for mais específico que o nome inicial, ou se o nome inicial for o padrão
-            $contactName = $geminiResponse['contact_name'] ?? $knownContactNameForGemini;
-            if ($contactName === 'Não mencionado' || $contactName === 'A ser qualificado') {
-                $contactName = $knownContactNameForGemini;
+            // Usar o nome do Gemini se for específico, caso contrário, usar o inicial ou o padrão
+            $contactName = $geminiResponse['contact_name'] ?? null;
+            if (empty($contactName) || $contactName === 'A ser qualificado' || $contactName === 'Não mencionado') {
+                $contactName = $initialContactName; // Volta para o nome do webhook ou padrão
             }
             
             $contactEmail = $geminiResponse['contact_email'] ?? null;
-            if ($contactEmail === 'Não mencionado' || $contactEmail === 'A ser qualificado') {
-                $contactEmail = $knownContactEmailForGemini;
+            // Se o Gemini retornou email 'A ser qualificado' ou 'Não mencionado', consideramos como não encontrado.
+            if ($contactEmail === 'A ser qualificado' || $contactEmail === 'Não mencionado') {
+                $contactEmail = null;
             }
 
             $spinData = $geminiResponse['spin_data'] ?? []; // Array associativo com S, P, I, N
@@ -111,20 +96,20 @@ class ProcessWhatsappMessage implements ShouldQueue
             $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
 
 
-            // --- 2. (Re)Tente encontrar ou criar uma pessoa (contato) após a resposta do Gemini ---
-            // Isso é importante caso o Gemini tenha extraído um nome/email que ainda não estava no CRM.
+            // --- 2. Tente encontrar ou criar uma pessoa (contato) ---
+            $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
+
             if (!$person) {
-                // Se a pessoa não foi encontrada inicialmente, tenta criar agora com o nome/email do Gemini
                 Log::info('Pessoa não encontrada, criando nova pessoa para o número: ' . $from);
                 $defaultUser = User::first(); 
 
                 $personData = [
-                    'name'            => $contactName, 
+                    'name'            => $contactName, // Usar o nome extraído ou do Gemini
                     'contact_numbers' => json_encode([['value' => $from, 'label' => 'mobile']]),
                     'user_id'         => $defaultUser->id ?? null,
                 ];
 
-                if ($contactEmail && $contactEmail !== 'A ser qualificado' && $contactEmail !== 'Não mencionado') {
+                if ($contactEmail) { // Apenas adiciona email se Gemini retornou algo valido
                     $personData['emails'] = json_encode([['value' => $contactEmail, 'label' => 'work']]);
                 } else {
                     $personData['emails'] = json_encode([]);
@@ -136,12 +121,13 @@ class ProcessWhatsappMessage implements ShouldQueue
                     Log::warning('Nenhum usuário padrão encontrado para atribuir a nova pessoa. A pessoa foi criada sem atribuição de usuário.');
                 }
             } else {
-                // Se a pessoa já existia, atualiza com as informações do Gemini se forem mais completas
-                if ($contactName !== $person->name && (str_starts_with($person->name, 'Cliente WhatsApp ') || ($contactName !== 'A ser qualificado' && $contactName !== 'Não mencionado'))) {
+                // Se a pessoa já existia, tenta atualizar o nome se o Gemini forneceu um nome mais específico
+                if ($contactName !== $person->name && !str_starts_with($contactName, 'Cliente WhatsApp ')) {
                     $person->update(['name' => $contactName]);
                     Log::info('Nome da pessoa atualizado pelo Gemini: ' . $contactName);
                 }
-                if ($contactEmail && $contactEmail !== 'A ser qualificado' && $contactEmail !== 'Não mencionado' && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
+                // Tenta atualizar o email se o Gemini forneceu um email e ele ainda não existe
+                if ($contactEmail && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
                     $emails = json_decode($person->emails, true) ?? [];
                     $emails[] = ['value' => $contactEmail, 'label' => 'work'];
                     $person->update(['emails' => json_encode($emails)]);
@@ -155,9 +141,9 @@ class ProcessWhatsappMessage implements ShouldQueue
             $shouldCreateLead = false;
 
             // Critérios para criar um lead:
-            // 1. O Gemini conseguiu extrair um nome de contato que não é o padrão "Cliente WhatsApp <número>"
-            // 2. Ou o Gemini conseguiu extrair algum dado de SPIN ou BANT que não seja "Não qualificado" ou vazio.
-            if ($contactName !== ('Cliente WhatsApp ' . $from) && $contactName !== 'A ser qualificado' && $contactName !== 'Não mencionado') {
+            // O nome do contato é mais específico (não é o padrão "Cliente WhatsApp <número>")
+            // OU o Gemini conseguiu extrair algum dado de SPIN ou BANT que não seja "Não qualificado" ou vazio.
+            if (!str_starts_with($contactName, 'Cliente WhatsApp ') && $contactName !== 'A ser qualificado' && $contactName !== 'Não mencionado') {
                 $shouldCreateLead = true;
             } else {
                 foreach ($spinData as $key => $value) {
@@ -255,43 +241,50 @@ class ProcessWhatsappMessage implements ShouldQueue
             if (!empty($spinData)) {
                 $spinNote = "Dados SPIN:\n";
                 foreach ($spinData as $key => $value) {
-                    $spinNote .= ucfirst($key) . ": " . $value . "\n";
+                    if ($value !== 'Não qualificado' && !empty($value)) { // Salvar apenas dados qualificados
+                        $spinNote .= ucfirst($key) . ": " . $value . "\n";
+                    }
                 }
-                $activityData['title'] = 'Qualificação SPIN';
-                $activityData['description'] = $spinNote;
-                $activityData['type'] = 'note';
-                $activityData['schedule_from'] = now();
-                $activityData['schedule_to'] = now();
+                if (strlen($spinNote) > 13) { // Se houver algo além do cabeçalho
+                    $activityData['title'] = 'Qualificação SPIN';
+                    $activityData['description'] = $spinNote;
+                    $activityData['type'] = 'note';
+                    $activityData['schedule_from'] = now();
+                    $activityData['schedule_to'] = now();
 
-                if ($lead) {
-                    $activityData['lead_id'] = $lead->id;
-                } else {
-                    unset($activityData['lead_id']); // Garante que não há lead_id se o lead não foi criado
+                    if ($lead) {
+                        $activityData['lead_id'] = $lead->id;
+                    } else {
+                        unset($activityData['lead_id']); // Garante que não há lead_id se o lead não foi criado
+                    }
+                    Activity::create($activityData);
+                    Log::info('Dados SPIN adicionados como nota de atividade.');
                 }
-                Activity::create($activityData);
-                Log::info('Dados SPIN adicionados como nota de atividade.');
             }
 
             if (!empty($bantData)) {
                 $bantNote = "Dados BANT:\n";
                 foreach ($bantData as $key => $value) {
-                    $bantNote .= ucfirst($key) . ": " . $value . "\n";
+                    if ($value !== 'Não qualificado' && !empty($value)) { // Salvar apenas dados qualificados
+                        $bantNote .= ucfirst($key) . ": " . $value . "\n";
+                    }
                 }
-                $activityData['title'] = 'Qualificação BANT';
-                $activityData['description'] = $bantNote;
-                $activityData['type'] = 'note';
-                $activityData['schedule_from'] = now();
-                $activityData['schedule_to'] = now();
+                if (strlen($bantNote) > 13) { // Se houver algo além do cabeçalho
+                    $activityData['title'] = 'Qualificação BANT';
+                    $activityData['description'] = $bantNote;
+                    $activityData['type'] = 'note';
+                    $activityData['schedule_from'] = now();
+                    $activityData['schedule_to'] = now();
 
-                if ($lead) {
-                    $activityData['lead_id'] = $lead->id;
-                } else {
-                    unset($activityData['lead_id']); // Garante que não há lead_id se o lead não foi criado
+                    if ($lead) {
+                        $activityData['lead_id'] = $lead->id;
+                    } else {
+                        unset($activityData['lead_id']); // Garante que não há lead_id se o lead não foi criado
+                    }
+                    Activity::create($activityData);
+                    Log::info('Dados BANT adicionados como nota de atividade.');
                 }
-                Activity::create($activityData);
-                Log::info('Dados BANT adicionados como nota de atividade.');
             }
-
 
             Log::info('Processamento da mensagem do WhatsApp concluído.', [
                 'lead_id' => $lead->id ?? 'N/A (Lead não criado)',
@@ -302,13 +295,6 @@ class ProcessWhatsappMessage implements ShouldQueue
 
             // --- 6. Enviar resposta de volta para o WhatsApp ---
             $this->sendWhatsappMessage($from, $preAttendanceText);
-
-            // --- 7. Salvar o histórico da conversa na pessoa ---
-            $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $text]]];
-            $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $preAttendanceText]]];
-            $person->conversation_history = json_encode($conversationHistory);
-            $person->save();
-            Log::info('Histórico da conversa atualizado para a pessoa.', ['person_id' => $person->id, 'history_length' => count($conversationHistory)]);
 
             // Marca a mensagem como processada no cache
             if ($messageId) {
@@ -362,65 +348,56 @@ class ProcessWhatsappMessage implements ShouldQueue
      * @param string $message O texto da mensagem do usuário.
      * @param string $knownContactName O nome do contato já conhecido (do CRM).
      * @param string $knownContactEmail O email do contato já conhecido (do CRM).
-     * @param array $conversationHistory O histórico da conversa com o Gemini.
      * @return array A resposta processada do Gemini.
      */
-    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, array $conversationHistory): array
+    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail): array
     {
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
-        // Adiciona o nome e email conhecidos ao prompt para que o Gemini possa considerar o contexto
-        $contextualPrompt = "Contexto atual: ";
-        $nameKnown = !($knownContactName === 'A ser qualificado' || str_starts_with($knownContactName, 'Cliente WhatsApp'));
-        $emailKnown = !($knownContactEmail === 'A ser qualificado' || $knownContactEmail === 'Não mencionado');
-
-        if ($nameKnown) {
-            $contextualPrompt .= "O nome do cliente JÁ é conhecido e é '{$knownContactName}'. ";
-        } else {
-            $contextualPrompt .= "O nome do cliente AINDA NÃO é conhecido. ";
+        // Define o contexto atual para o Gemini
+        $contextualPrompt = "O nome do cliente é '{$knownContactName}'.";
+        if ($knownContactName === 'A ser qualificado' || str_starts_with($knownContactName, 'Cliente WhatsApp')) {
+            $contextualPrompt = "O nome do cliente NÃO é conhecido.";
         }
 
-        if ($emailKnown) {
-            $contextualPrompt .= "O e-mail do cliente JÁ é conhecido e é '{$knownContactEmail}'.";
-        } else {
-            $contextualPrompt .= "O e-mail do cliente AINDA NÃO é conhecido.";
+        $emailContext = "O e-mail do cliente é '{$knownContactEmail}'.";
+        if ($knownContactEmail === 'A ser qualificado' || $knownContactEmail === 'Não mencionado') {
+            $emailContext = "O e-mail do cliente NÃO é conhecido.";
         }
-
 
         // Prompt aprimorado para guiar o fluxo da conversa: Nome > SPIN/BANT > Email
-        $systemInstruction = "Você é um assistente de pré-atendimento de vendas. Seu objetivo é qualificar leads pelo WhatsApp, seguindo a seguinte ordem de prioridade para coletar informações:
+        $prompt = "Você é um assistente de pré-atendimento de vendas. Seu objetivo é qualificar leads pelo WhatsApp, seguindo a seguinte ordem de prioridade para coletar informações:
         1.  **Nome completo do cliente**: Peça o nome se ainda não o tiver.
         2.  **Qualificação SPIN/BANT**: Faça perguntas baseadas em SPIN (Situação, Problema, Implicação, Necessidade de Solução) e BANT (Budget, Authority, Need, Timeline) para entender as necessidades do cliente.
         3.  **Endereço de e-mail do cliente**: Peça o e-mail por último, após alguma qualificação inicial.
 
-        {$contextualPrompt}
+        {$contextualPrompt} {$emailContext}
+
+        Analise a seguinte mensagem do cliente: \"{$message}\".
 
         Com base na análise da mensagem e do contexto atual, crie um texto de pré-atendimento amigável e profissional para o cliente ('pre_attendance_text'), seguindo ESTA lógica de prioridade estrita para a PRÓXIMA pergunta:
-        - SE o nome do cliente AINDA NÃO é conhecido:
-            - SE a mensagem ATUAL contém o nome do cliente: o 'pre_attendance_text' DEVE agradecer pelo nome e fazer uma pergunta de qualificação (SPIN/BANT).
+        - SE o nome do cliente NÃO é conhecido:
+            - SE a mensagem ATUAL contém o nome do cliente: o 'pre_attendance_text' DEVE agradecer pelo nome e FAZER UMA PERGUNTA DE QUALIFICAÇÃO (SPIN/BANT).
             - CASO CONTRÁRIO (a mensagem ATUAL NÃO contém o nome): o 'pre_attendance_text' DEVE pedir o nome completo.
         - SENÃO (o nome do cliente JÁ é conhecido):
-            - SE a mensagem ATUAL contém informações de qualificação (SPIN/BANT) OU as qualificações JÁ estão completas (não são 'Não qualificado' e não vazias): o 'pre_attendance_text' DEVE reconhecer a informação (se houver) e, SE o e-mail AINDA NÃO é conhecido, pedir o e-mail.
-            - CASO CONTRÁRIO (a mensagem ATUAL NÃO contém informações de qualificação E as qualificações AINDA NÃO estão completas): o 'pre_attendance_text' DEVE fazer uma pergunta de qualificação (SPIN/BANT).
-
-        Retorne a resposta em formato JSON, com as seguintes chaves:
+            - SE a mensagem ATUAL CONTÉM informações de qualificação (SPIN/BANT): o 'pre_attendance_text' DEVE reconhecer a informação e, SE o e-mail NÃO é conhecido, pedir o e-mail. CASO CONTRÁRIO, se o e-mail JÁ é conhecido, o 'pre_attendance_text' deve oferecer ajuda adicional.
+            - CASO CONTRÁRIO (a mensagem ATUAL NÃO contém informações de qualificação): o 'pre_attendance_text' DEVE fazer uma pergunta de qualificação (SPIN/BANT).
+        
+        Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. As chaves do JSON devem ser:
         - 'pre_attendance_text': O texto de pré-atendimento para o cliente.
-        - 'contact_name': O nome completo do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar um nome claro na mensagem ATUAL, use o nome do CONTEXTO ATUAL ('{$knownContactName}'). Se o nome do contexto também for 'A ser qualificado', mantenha 'A ser qualificado'.
-        - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar, use o e-mail do CONTEXTO ATUAL ('{$knownContactEmail}'). Se o e-mail do contexto também for 'A ser qualificado', mantenha 'A ser qualificado'.
-        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
-        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
+        - 'contact_name': O nome completo do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar um nome claro na mensagem ATUAL, use o valor do CONTEXTO ATUAL ('{$knownContactName}').
+        - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar, use o valor do CONTEXTO ATUAL ('{$knownContactEmail}').
+        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
+        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
 
-        Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON.
         ";
 
         // Constrói o array de 'contents' com o histórico e a nova mensagem
         $contents = [];
-        foreach ($conversationHistory as $turn) {
-            $contents[] = $turn;
-        }
         // Adiciona a instrução do sistema como a primeira parte da conversa para guiar o modelo
-        $contents[] = ['role' => 'user', 'parts' => [['text' => $systemInstruction . "\n\nMensagem do cliente: \"{$message}\""]]];
+        $contents[] = ['role' => 'user', 'parts' => [['text' => $prompt]]]; // O prompt completo é a instrução inicial
+        $contents[] = ['role' => 'user', 'parts' => [['text' => "Mensagem do cliente: \"{$message}\""]]];
 
 
         try {
@@ -512,8 +489,8 @@ class ProcessWhatsappMessage implements ShouldQueue
     {
         return [
             'pre_attendance_text' => "Olá! Recebemos sua mensagem. Para que eu possa te ajudar melhor, poderia me dizer qual é o seu nome completo?", // Alterado para pedir apenas o nome
-            'contact_name'        => 'Não mencionado',
-            'contact_email'       => 'Não mencionado',
+            'contact_name'        => 'A ser qualificado', // Usar "A ser qualificado" como placeholder padrão
+            'contact_email'       => 'A ser qualificado', // Usar "A ser qualificado" como placeholder padrão
             'spin_data'           => [
                 'situacao'   => 'Não qualificado',
                 'problema'   => 'Não qualificado',
