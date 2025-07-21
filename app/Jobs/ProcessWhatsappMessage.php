@@ -405,7 +405,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         6.  **NÃO peça e-mail.**
         7.  **Mantenha a conversa fluida e natural**, fazendo uma pergunta por vez, a menos que seja uma saudação inicial.
         8.  **Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO**, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. Certifique-se de que TODAS as chaves JSON esperadas estejam presentes, mesmo que com valor 'Não qualificado' ou 'Não conhecido'.
-        9.  **Os valores de 'spin_data' devem conter APENAS a informação qualificada ou 'Não qualificado'**, sem incluir perguntas ou exemplos. As perguntas devem ser parte do 'pre_attendance_text'.
+        9.  **Os valores de 'spin_data' (situacao, problema, implicacao, necessidade) devem ser APENAS a qualificação direta e concisa (ex: 'Não gerencia vendas', 'Perda de clientes', 'Impacto na receita', 'CRM com automação') ou 'Não qualificado' se a informação ainda não foi obtida. NÃO inclua perguntas ou exemplos dentro desses valores.**
         10. **Se já tiver todas as informações (nome, empresa e qualificação SPIN completa):** Informe que um especialista entrará em contato em breve.
 
         Contexto atual:
@@ -542,7 +542,7 @@ class ProcessWhatsappMessage implements ShouldQueue
     protected function getDefaultGeminiResponse(): array
     {
         return [
-            'pre_attendance_text' => "Olá! Recebemos sua mensagem. Para que eu possa te ajudar melhor, poderia me dizer qual é o seu nome completo e o nome da sua empresa?",
+            'pre_attendance_text' => "Olá! Recebemos sua mensagem. Houve um pequeno problema na minha resposta, mas não se preocupe, um membro da nossa equipe entrará em contato em breve para te ajudar!",
             'contact_name'        => 'Não conhecido',
             'contact_email'       => 'Não qualificado',
             'contact_company'     => 'Não conhecido', // Adicionado o nome da empresa
