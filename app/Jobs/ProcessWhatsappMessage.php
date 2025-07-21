@@ -18,7 +18,7 @@ use Webkul\Lead\Models\Type;
 use Webkul\Lead\Models\Pipeline;
 use Webkul\Lead\Models\Stage;
 use Webkul\User\Models\User;
-use Webkul\Lead\Models\LeadNote; // Para adicionar notas ao lead
+use Webkul\Activity\Models\Activity; // Usaremos o modelo Activity diretamente para criar a atividade
 
 class ProcessWhatsappMessage implements ShouldQueue
 {
@@ -95,7 +95,8 @@ class ProcessWhatsappMessage implements ShouldQueue
                 }
             } else {
                 // Atualizar nome e email se o Gemini forneceu informações mais detalhadas
-                if ($contactName && $person->name === ('Cliente WhatsApp ' . $from)) { // Só atualiza se for o nome padrão
+                // Apenas atualiza se o nome atual for o padrão 'Cliente WhatsApp <número>'
+                if ($contactName && str_starts_with($person->name, 'Cliente WhatsApp ')) {
                     $person->update(['name' => $contactName]);
                 }
                 if ($contactEmail && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
@@ -118,7 +119,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $defaultStage = null;
 
                 if ($defaultPipeline) {
-                    // CORREÇÃO AQUI: Usar 'lead_pipeline_id' em vez de 'pipeline_id'
+                    // Usar 'lead_pipeline_id' para buscar a stage
                     $defaultStage = Stage::where('lead_pipeline_id', $defaultPipeline->id)->orderBy('sort_order')->first();
                 }
 
@@ -145,32 +146,54 @@ class ProcessWhatsappMessage implements ShouldQueue
                 Log::info('Lead existente encontrado para a pessoa: ' . $person->name);
             }
 
-            // --- 4. Adicionar a mensagem original e a resposta do Gemini como notas ao lead ---
-            $lead->notes()->create([
+            // --- 4. Adicionar a mensagem original e a resposta do Gemini como ATIVIDADES ao lead ---
+            // Criar uma nova atividade para a mensagem original do WhatsApp
+            Activity::create([
+                'title'       => 'Mensagem WhatsApp Recebida',
+                'description' => 'Mensagem original de ' . $from . ': ' . $text,
+                'type'        => 'whatsapp_message', // Um novo tipo de atividade para mensagens do WhatsApp
+                'lead_id'     => $lead->id,
+                'person_id'   => $person->id,
                 'user_id'     => $person->user_id,
-                'note'        => 'Mensagem original do WhatsApp de ' . $from . ': ' . $text,
-                'created_at'  => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
-                'updated_at'  => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
+                'is_done'     => 1, // Considerar a mensagem recebida como uma atividade "concluída"
+                'schedule_from' => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
+                'schedule_to'   => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
             ]);
+            Log::info('Mensagem original do WhatsApp adicionada como atividade ao lead.');
 
-            $lead->notes()->create([
+            // Criar uma nova atividade para a resposta do Gemini (pré-atendimento)
+            Activity::create([
+                'title'       => 'Resposta Automática (Gemini)',
+                'description' => 'Resposta do Gemini (pré-atendimento): ' . $preAttendanceText,
+                'type'        => 'whatsapp_message_auto_response', // Outro tipo de atividade para respostas automáticas
+                'lead_id'     => $lead->id,
+                'person_id'   => $person->id,
                 'user_id'     => $person->user_id,
-                'note'        => 'Resposta do Gemini (pré-atendimento): ' . $preAttendanceText,
-                'created_at'  => now(),
-                'updated_at'  => now(),
+                'is_done'     => 1,
+                'schedule_from' => now(),
+                'schedule_to'   => now(),
             ]);
+            Log::info('Resposta do Gemini adicionada como atividade ao lead.');
 
-            // --- 5. Salvar dados de SPIN e BANT como notas ou campos personalizados (se houver) ---
+            // --- 5. Salvar dados de SPIN e BANT como NOTAS (ainda pode usar notas se preferir um formato mais livre) ---
+            // Ou você pode criar atividades separadas para cada um, ou até mesmo campos personalizados no Lead.
             if (!empty($spinData)) {
                 $spinNote = "Dados SPIN:\n";
                 foreach ($spinData as $key => $value) {
                     $spinNote .= ucfirst($key) . ": " . $value . "\n";
                 }
-                $lead->notes()->create([
-                    'user_id' => $person->user_id,
-                    'note'    => $spinNote,
+                Activity::create([
+                    'title'       => 'Qualificação SPIN',
+                    'description' => $spinNote,
+                    'type'        => 'note', // Usar o tipo 'note' para isso
+                    'lead_id'     => $lead->id,
+                    'person_id'   => $person->id,
+                    'user_id'     => $person->user_id,
+                    'is_done'     => 1,
+                    'schedule_from' => now(),
+                    'schedule_to'   => now(),
                 ]);
-                Log::info('Dados SPIN adicionados ao lead.');
+                Log::info('Dados SPIN adicionados como nota de atividade ao lead.');
             }
 
             if (!empty($bantData)) {
@@ -178,15 +201,22 @@ class ProcessWhatsappMessage implements ShouldQueue
                 foreach ($bantData as $key => $value) {
                     $bantNote .= ucfirst($key) . ": " . $value . "\n";
                 }
-                $lead->notes()->create([
-                    'user_id' => $person->user_id,
-                    'note'    => $bantNote,
+                Activity::create([
+                    'title'       => 'Qualificação BANT',
+                    'description' => $bantNote,
+                    'type'        => 'note', // Usar o tipo 'note' para isso
+                    'lead_id'     => $lead->id,
+                    'person_id'   => $person->id,
+                    'user_id'     => $person->user_id,
+                    'is_done'     => 1,
+                    'schedule_from' => now(),
+                    'schedule_to'   => now(),
                 ]);
-                Log::info('Dados BANT adicionados ao lead.');
+                Log::info('Dados BANT adicionados como nota de atividade ao lead.');
             }
 
 
-            Log::info('Mensagem do WhatsApp processada, pessoa e lead atualizados/criados.', [
+            Log::info('Mensagem do WhatsApp processada, pessoa e lead atualizados/criados e atividades registradas.', [
                 'lead_id' => $lead->id,
                 'person_id' => $person->id,
                 'from' => $from,
