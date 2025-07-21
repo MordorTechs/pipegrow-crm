@@ -57,17 +57,24 @@ class ProcessWhatsappMessage implements ShouldQueue
                 return;
             }
 
+            // --- Extrair nome do contato do payload do webhook (se disponível) ---
+            $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
+
             // --- 1. Pré-atendimento com Gemini 2.5 ---
             $geminiResponse = $this->callGeminiAPI($text);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
-            // Exemplo de como o Gemini poderia retornar os dados:
-            // Supondo que o Gemini retorne um JSON com campos como 'pre_attendance_text', 'contact_name', 'contact_email', 'spin_data', 'bant_data'
-            $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
-            $contactName = $geminiResponse['contact_name'] ?? ('Cliente WhatsApp ' . $from);
+            // Usar o nome do Gemini se for mais específico que o nome inicial, ou se o nome inicial for o padrão
+            $contactName = $geminiResponse['contact_name'] ?? $initialContactName;
+            if ($contactName === 'Não mencionado' || $contactName === 'A ser qualificado') {
+                $contactName = $initialContactName;
+            }
+            
             $contactEmail = $geminiResponse['contact_email'] ?? null;
             $spinData = $geminiResponse['spin_data'] ?? []; // Array associativo com S, P, I, N
             $bantData = $geminiResponse['bant_data'] ?? []; // Array associativo com B, A, N, T
+            $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
+
 
             // --- 2. Tente encontrar ou criar uma pessoa (contato) ---
             $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
@@ -77,7 +84,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $defaultUser = User::first(); // Você pode definir uma lógica mais robusta para encontrar o usuário padrão
 
                 $personData = [
-                    'name'            => $contactName,
+                    'name'            => $contactName, // Usar o nome extraído ou do Gemini
                     'contact_numbers' => json_encode([['value' => $from, 'label' => 'mobile']]),
                     'user_id'         => $defaultUser->id ?? null,
                 ];
@@ -95,8 +102,8 @@ class ProcessWhatsappMessage implements ShouldQueue
                 }
             } else {
                 // Atualizar nome e email se o Gemini forneceu informações mais detalhadas
-                // Apenas atualiza se o nome atual for o padrão 'Cliente WhatsApp <número>'
-                if ($contactName && str_starts_with($person->name, 'Cliente WhatsApp ')) {
+                // Apenas atualiza se o nome atual for o padrão 'Cliente WhatsApp <número>' ou se o Gemini retornou um nome mais específico
+                if ($contactName !== $person->name && ($person->name === ('Cliente WhatsApp ' . $from) || $contactName !== ('Cliente WhatsApp ' . $from))) {
                     $person->update(['name' => $contactName]);
                 }
                 if ($contactEmail && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
@@ -127,7 +134,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $defaultType = Type::first();
 
                 $lead = Lead::create([
-                    'title'               => 'Lead WhatsApp de ' . $person->name,
+                    'title'               => 'Lead WhatsApp de ' . $contactName, // Usar o nome extraído ou do Gemini no título do lead
                     'lead_pipeline_id'    => $defaultPipeline->id ?? null,
                     'lead_pipeline_stage_id' => $defaultStage->id ?? null,
                     'lead_source_id'      => $whatsappSource->id ?? null,
