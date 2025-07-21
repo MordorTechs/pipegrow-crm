@@ -38,3 +38,7 @@ Route::get('/webhook/facebook', [FacebookWebhookController::class, 'verifyWebhoo
 Route::post('/webhook/facebook', [FacebookWebhookController::class, 'handleWebhook']);
 
 Route::post('/webhook/facebook/create-lead', [FacebookWebhookController::class, 'createlead']);
+
+// Novas rotas para o webhook do WhatsApp
+Route::get('/webhook/whatsapp', [WhatsappWebhookController::class, 'verifyWebhook']);
+Route::post('/webhook/whatsapp', [WhatsappWebhookController::class, 'handleWebhook']);
