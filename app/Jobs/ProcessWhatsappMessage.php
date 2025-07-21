@@ -176,8 +176,12 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $whatsappSource = Source::firstOrCreate(['name' => 'WhatsApp'], ['code' => 'whatsapp']);
                 $defaultType = Type::first();
 
+                // Acessa o nome da organização de forma segura
+                $organizationNameForLead = optional($person->organization)->name;
+                $leadTitle = 'Lead WhatsApp de ' . $person->name . ($organizationNameForLead ? ' (' . $organizationNameForLead . ')' : '');
+
                 $lead = Lead::create([
-                    'title'               => 'Lead WhatsApp de ' . $person->name . (!empty($person->organization->name) ? ' (' . $person->organization->name . ')' : ''),
+                    'title'               => $leadTitle,
                     'lead_pipeline_id'    => $defaultPipeline->id ?? null,
                     'lead_pipeline_stage_id' => $defaultStage->id ?? null,
                     'lead_source_id'      => $whatsappSource->id ?? null,
@@ -195,8 +199,9 @@ class ProcessWhatsappMessage implements ShouldQueue
             } else {
                 Log::info('Lead existente encontrado para a pessoa: ' . $person->name);
                 // Atualiza o título do lead se o nome da empresa for coletado posteriormente
-                if (!empty($person->organization->name) && !str_contains($lead->title, $person->organization->name)) {
-                    $lead->update(['title' => 'Lead WhatsApp de ' . $person->name . ' (' . $person->organization->name . ')']);
+                $organizationNameForLead = optional($person->organization)->name;
+                if ($organizationNameForLead && !str_contains($lead->title, $organizationNameForLead)) {
+                    $lead->update(['title' => 'Lead WhatsApp de ' . $person->name . ' (' . $organizationNameForLead . ')']);
                 }
             }
 
@@ -204,10 +209,13 @@ class ProcessWhatsappMessage implements ShouldQueue
             $preAttendanceText = '';
             $nextState = $conversationState;
 
+            // Acessa o nome da organização de forma segura para a lógica de estado
+            $personOrganizationName = optional($person->organization)->name;
+
             if (empty($person->name) || $person->name === 'Não conhecido' || str_starts_with($person->name, 'Cliente WhatsApp ')) {
                 $preAttendanceText = "Olá! Qual é o seu nome completo?";
                 $nextState = 'awaiting_name';
-            } elseif (empty($person->organization_id) || $person->organization->name === 'Não conhecido') {
+            } elseif (empty($person->organization_id) || empty($personOrganizationName) || $personOrganizationName === 'Não conhecido') {
                 $preAttendanceText = "Olá, " . $person->name . "! Qual o nome da empresa que você representa?";
                 $nextState = 'awaiting_company';
             } else {
