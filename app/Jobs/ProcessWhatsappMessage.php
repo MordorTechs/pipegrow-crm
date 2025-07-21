@@ -120,17 +120,18 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $contactCompany = null;
             }
 
+            // Agora, os valores de spin_data virão como strings vazias se não qualificados
             $spinData = $geminiResponse['spin_data'] ?? [
-                'situacao' => 'Não qualificado',
-                'problema' => 'Não qualificado',
-                'implicacao' => 'Não qualificado',
-                'necessidade' => 'Não qualificado'
+                'situacao' => '',
+                'problema' => '',
+                'implicacao' => '',
+                'necessidade' => ''
             ];
             $bantData = $geminiResponse['bant_data'] ?? [
-                'budget' => 'Não qualificado',
-                'authority' => 'Não qualificado',
-                'need' => 'Não qualificado',
-                'timeline' => 'Não qualificado'
+                'budget' => '',
+                'authority' => '',
+                'need' => '',
+                'timeline' => ''
             ];
             
             $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
@@ -172,17 +173,16 @@ class ProcessWhatsappMessage implements ShouldQueue
                     $person->update(['emails' => json_encode($emails)]);
                     Log::info('Email da pessoa adicionado/atualizado pelo Gemini: ' . $contactEmail);
                 }
-                Log::info('Pessoa existente processada: ' . $person->name);
-            }
-
-            // --- Lidar com o nome da empresa ---
-            if ($contactCompany) {
-                $organization = Organization::firstOrCreate(['name' => $contactCompany]);
-                if ($person->organization_id !== $organization->id) {
+                // Tenta atualizar a organização se o Gemini forneceu um nome de empresa e ele ainda não está associado
+                if ($contactCompany && (!$person->organization || $person->organization->name !== $contactCompany)) {
+                    $organization = Organization::firstOrCreate(['name' => $contactCompany]);
                     $person->update(['organization_id' => $organization->id]);
                     Log::info('Pessoa associada à organização: ' . $organization->name);
                 }
+                Log::info('Pessoa existente processada: ' . $person->name);
             }
+
+            // --- Lidar com o nome da empresa (já feito no bloco acima) ---
 
 
             // --- 3. Lógica para criar ou encontrar um lead associado a esta pessoa ---
@@ -264,11 +264,13 @@ class ProcessWhatsappMessage implements ShouldQueue
             if (!empty($spinData)) {
                 $spinNote = "Dados SPIN:\n";
                 foreach ($spinData as $key => $value) {
-                    if ($value !== 'Não qualificado' && !empty($value)) {
+                    // Agora, verifica se o valor não é uma string vazia para adicionar à nota
+                    if (!empty($value)) {
                         $spinNote .= ucfirst($key) . ": " . $value . "\n";
                     }
                 }
-                if (strlen($spinNote) > 13) {
+                // Ajusta o comprimento mínimo para a nota, já que "Não qualificado" não será mais adicionado por padrão
+                if (strlen($spinNote) > 13) { // Se houver algo além do cabeçalho "Dados SPIN:\n"
                     $activityData['title'] = 'Qualificação SPIN';
                     $activityData['description'] = $spinNote;
                     $activityData['type'] = 'note';
@@ -288,11 +290,12 @@ class ProcessWhatsappMessage implements ShouldQueue
             if (!empty($bantData)) {
                 $bantNote = "Dados BANT:\n";
                 foreach ($bantData as $key => $value) {
-                    if ($value !== 'Não qualificado' && !empty($value)) {
+                    // Agora, verifica se o valor não é uma string vazia para adicionar à nota
+                    if (!empty($value)) {
                         $bantNote .= ucfirst($key) . ": " . $value . "\n";
                     }
                 }
-                if (strlen($bantNote) > 13) {
+                if (strlen($bantNote) > 13) { // Se houver algo além do cabeçalho "Dados BANT:\n"
                     $activityData['title'] = 'Qualificação BANT';
                     $activityData['description'] = $bantNote;
                     $activityData['type'] = 'note';
@@ -390,48 +393,55 @@ class ProcessWhatsappMessage implements ShouldQueue
         $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
         Log::info('Mensagem do usuário adicionada ao histórico ANTES da chamada Gemini.', ['from' => $from, 'history_length' => count($conversationHistory)]);
 
-        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é qualificar leads usando a metodologia SPIN e coletar o nome da empresa do cliente.
+        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é qualificar leads usando a metodologia SPIN e coletar o nome do cliente e o nome da empresa.
 
-        Instruções:
-        1.  **Cumprimente o cliente** de forma amigável.
-        2.  **Se o nome do cliente não for conhecido ('Não conhecido'):** Pergunte o nome completo do cliente.
-        3.  **Se o nome do cliente for conhecido, mas o nome da empresa não ('Não conhecido'):** Pergunte o nome da empresa do cliente.
-        4.  **Se o nome e a empresa forem conhecidos:** Inicie a qualificação SPIN.
-            * **Situação (S):** Faça perguntas para entender a situação atual do cliente. Ex: 'Como você gerencia seus processos de vendas atualmente?'
-            * **Problema (P):** Identifique os problemas ou desafios que o cliente enfrenta. Ex: 'Quais são os maiores desafios que sua equipe de vendas enfrenta?'
-            * **Implicação (I):** Ajude o cliente a perceber as consequências dos problemas. Ex: 'Como esses desafios impactam seus resultados de vendas?'
-            * **Necessidade de Solução (N):** Leve o cliente a expressar a necessidade de uma solução. Ex: 'O que você espera de uma nova ferramenta de CRM?'
-        5.  **NÃO faça perguntas BANT.**
-        6.  **NÃO peça e-mail.**
-        7.  **Mantenha a conversa fluida e natural**, fazendo uma pergunta por vez, a menos que seja uma saudação inicial.
-        8.  **Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO**, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. Certifique-se de que TODAS as chaves JSON esperadas estejam presentes, mesmo que com valor 'Não qualificado' ou 'Não conhecido'.
-        9.  **Os valores de 'spin_data' (situacao, problema, implicacao, necessidade) devem ser APENAS a qualificação direta e concisa (ex: 'Não gerencia vendas', 'Perda de clientes', 'Impacto na receita', 'CRM com automação') ou 'Não qualificado' se a informação ainda não foi obtida. NÃO inclua perguntas ou exemplos dentro desses valores.**
-        10. **Se já tiver todas as informações (nome, empresa e qualificação SPIN completa):** Informe que um especialista entrará em contato em breve.
+        Instruções gerais:
+        - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
+        - Certifique-se de que TODAS as chaves JSON esperadas (pre_attendance_text, contact_name, contact_email, contact_company, spin_data, bant_data) estejam presentes.
+        - Os valores de 'contact_email', e todos os campos dentro de 'bant_data' devem ser uma string vazia (\" \").
+        - Os valores de 'contact_name' e 'contact_company' devem ser o dado qualificado ou \"\" se não obtido.
+        - Os valores de 'spin_data' (situacao, problema, implicacao, necessidade) devem ser APENAS a qualificação direta e concisa (ex: 'Não gerencia vendas', 'Perda de clientes', 'Impacto na receita', 'CRM com automação') ou uma string vazia (\" \") se a informação ainda não foi obtida. NÃO inclua perguntas, exemplos, ou qualquer texto adicional, como 'Ainda não perguntado' ou 'Aguardando resposta'.
+        - NÃO faça perguntas BANT.
+        - NÃO peça e-mail.
+        - Mantenha a conversa fluida e natural, fazendo UMA pergunta por vez no 'pre_attendance_text'.
 
-        Contexto atual:
-        - Nome do cliente: '{$knownContactName}'
-        - E-mail do cliente: '{$knownContactEmail}'
-        - Empresa do cliente: '{$knownContactCompany}'
+        Contexto atual do cliente (informações já conhecidas):
+        - Nome: '" . ($knownContactName === 'Não conhecido' ? '' : $knownContactName) . "'
+        - Empresa: '" . ($knownContactCompany === 'Não conhecido' ? '' : $knownContactCompany) . "'
+        - Situação (SPIN): '" . ($spinData['situacao'] ?? '') . "'
+        - Problema (SPIN): '" . ($spinData['problema'] ?? '') . "'
+        - Implicação (SPIN): '" . ($spinData['implicacao'] ?? '') . "'
+        - Necessidade (SPIN): '" . ($spinData['necessidade'] ?? '') . "'
 
-        Analise a conversa atual e a última mensagem do cliente: \"{$message}\".
+        Com base no contexto e na última mensagem do cliente: \"{$message}\", determine a próxima ação e preencha o JSON.
+
+        Lógica para 'pre_attendance_text' (a mensagem para o cliente):
+        1. Se o nome do cliente no contexto for vazio: Pergunte o nome completo.
+        2. Se o nome do cliente for conhecido, mas a empresa no contexto for vazia: Pergunte o nome da empresa.
+        3. Se nome e empresa forem conhecidos:
+           a. Se 'situacao' no contexto for vazia: Pergunte sobre a situação atual (SPIN). Ex: 'Como você gerencia seus processos de vendas atualmente?'
+           b. Se 'situacao' for qualificada, mas 'problema' no contexto for vazia: Pergunte sobre o problema (SPIN). Ex: 'Quais são os maiores desafios que sua equipe de vendas enfrenta?'
+           c. Se 'problema' for qualificado, mas 'implicacao' no contexto for vazia: Pergunte sobre a implicação (SPIN). Ex: 'Como esses desafios impactam seus resultados de vendas?'
+           d. Se 'implicacao' for qualificada, mas 'necessidade' no contexto for vazia: Pergunte sobre a necessidade de solução (SPIN). Ex: 'O que você espera de uma nova ferramenta de CRM?'
+           e. Se todas as informações (nome, empresa, e todas as etapas SPIN) forem qualificadas: Informe que um especialista entrará em contato em breve.
 
         A estrutura JSON COMPLETA esperada é:
         {
-            \"pre_attendance_text\": \"<texto de pré-atendimento>\",
-            \"contact_name\": \"<nome do contato>\",
-            \"contact_email\": \"Não qualificado\",
-            \"contact_company\": \"<nome da empresa>\",
+            \"pre_attendance_text\": \"<texto de pré-atendimento, contendo a próxima pergunta ou a finalização>\",
+            \"contact_name\": \"<nome do contato ou \"\">\",
+            \"contact_email\": \"\",
+            \"contact_company\": \"<nome da empresa ou \"\">\",
             \"spin_data\": {
-                \"situacao\": \"<qualificação da situação ou 'Não qualificado'>\",
-                \"problema\": \"<qualificação do problema ou 'Não qualificado'>\",
-                \"implicacao\": \"<qualificação da implicação ou 'Não qualificado'>\",
-                \"necessidade\": \"<qualificação da necessidade ou 'Não qualificado'>\"
+                \"situacao\": \"<qualificação da situação ou \"\">\",
+                \"problema\": \"<qualificação do problema ou \"\">\",
+                \"implicacao\": \"<qualificação da implicação ou \"\">\",
+                \"necessidade\": \"<qualificação da necessidade ou \"\">\"
             },
             \"bant_data\": {
-                \"budget\": \"Não qualificado\",
-                \"authority\": \"Não qualificado\",
-                \"need\": \"Não qualificado\",
-                \"timeline\": \"Não qualificado\"
+                \"budget\": \"\",
+                \"authority\": \"\",
+                \"need\": \"\",
+                \"timeline\": \"\"
             }
         }
         ";
@@ -544,19 +554,19 @@ class ProcessWhatsappMessage implements ShouldQueue
         return [
             'pre_attendance_text' => "Olá! Recebemos sua mensagem. Houve um pequeno problema na minha resposta, mas não se preocupe, um membro da nossa equipe entrará em contato em breve para te ajudar!",
             'contact_name'        => 'Não conhecido',
-            'contact_email'       => 'Não qualificado',
-            'contact_company'     => 'Não conhecido', // Adicionado o nome da empresa
+            'contact_email'       => '', // Alterado para string vazia
+            'contact_company'     => '', // Alterado para string vazia
             'spin_data'           => [
-                'situacao'   => 'Não qualificado',
-                'problema'   => 'Não qualificado',
-                'implicacao' => 'Não qualificado',
-                'necessidade' => 'Não qualificado'
+                'situacao'   => '', // Alterado para string vazia
+                'problema'   => '', // Alterado para string vazia
+                'implicacao' => '', // Alterado para string vazia
+                'necessidade' => ''  // Alterado para string vazia
             ],
             'bant_data'           => [
-                'budget'    => 'Não qualificado',
-                'authority' => 'Não qualificado',
-                'need'      => 'Não qualificado',
-                'timeline'  => 'Não qualificado'
+                'budget'    => '', // Alterado para string vazia
+                'authority' => '', // Alterado para string vazia
+                'need'      => '', // Alterado para string vazia
+                'timeline'  => ''  // Alterado para string vazia
             ]
         ];
     }
