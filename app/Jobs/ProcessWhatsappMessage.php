@@ -404,7 +404,8 @@ class ProcessWhatsappMessage implements ShouldQueue
         5.  **NÃO faça perguntas BANT.**
         6.  **NÃO peça e-mail.**
         7.  **Mantenha a conversa fluida e natural**, fazendo uma pergunta por vez, a menos que seja uma saudação inicial.
-        8.  **Se já tiver todas as informações (nome, empresa e qualificação SPIN completa):** Informe que um especialista entrará em contato em breve.
+        8.  **Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO**, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. Certifique-se de que TODAS as chaves JSON esperadas estejam presentes, mesmo que com valor 'Não qualificado' ou 'Não conhecido'.
+        9.  **Se já tiver todas as informações (nome, empresa e qualificação SPIN completa):** Informe que um especialista entrará em contato em breve.
 
         Contexto atual:
         - Nome do cliente: '{$knownContactName}'
@@ -413,13 +414,25 @@ class ProcessWhatsappMessage implements ShouldQueue
 
         Analise a conversa atual e a última mensagem do cliente: \"{$message}\".
 
-        Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. As chaves do JSON devem ser:
-        - 'pre_attendance_text': O texto de pré-atendimento para o cliente, seguindo a lógica acima.
-        - 'contact_name': O nome completo do cliente que você conseguiu extrair da conversa. Se não encontrar um nome claro na mensagem ATUAL, use o valor do CONTEXTO ATUAL ('{$knownContactName}').
-        - 'contact_email': Sempre 'Não qualificado'.
-        - 'contact_company': O nome da empresa do cliente que você conseguiu extrair da conversa. Se não encontrar, use o valor do CONTEXTO ATUAL ('{$knownContactCompany}').
-        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Preencha com as informações qualificadas ou 'Não qualificado' se ainda não houver dados ou a etapa não foi atingida.
-        - 'bant_data': Sempre um objeto JSON com todos os valores como 'Não qualificado'.
+        A estrutura JSON COMPLETA esperada é:
+        {
+            \"pre_attendance_text\": \"<texto de pré-atendimento>\",
+            \"contact_name\": \"<nome do contato>\",
+            \"contact_email\": \"Não qualificado\",
+            \"contact_company\": \"<nome da empresa>\",
+            \"spin_data\": {
+                \"situacao\": \"<qualificação da situação ou 'Não qualificado'>\",
+                \"problema\": \"<qualificação do problema ou 'Não qualificado'>\",
+                \"implicacao\": \"<qualificação da implicação ou 'Não qualificado'>\",
+                \"necessidade\": \"<qualificação da necessidade ou 'Não qualificado'>\"
+            },
+            \"bant_data\": {
+                \"budget\": \"Não qualificado\",
+                \"authority\": \"Não qualificado\",
+                \"need\": \"Não qualificado\",
+                \"timeline\": \"Não qualificado\"
+            }
+        }
         ";
 
         // Constrói o array 'contents' para a API do Gemini
@@ -530,7 +543,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         return [
             'pre_attendance_text' => "Olá! Recebemos sua mensagem. Para que eu possa te ajudar melhor, poderia me dizer qual é o seu nome completo e o nome da sua empresa?",
             'contact_name'        => 'Não conhecido',
-            'contact_email'       => 'Não conhecido',
+            'contact_email'       => 'Não qualificado',
             'contact_company'     => 'Não conhecido', // Adicionado o nome da empresa
             'spin_data'           => [
                 'situacao'   => 'Não qualificado',
