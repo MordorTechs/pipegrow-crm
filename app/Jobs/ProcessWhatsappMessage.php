@@ -293,13 +293,18 @@ class ProcessWhatsappMessage implements ShouldQueue
         // Verifica se é um número brasileiro (começa com 55)
         if (str_starts_with($cleanedNumber, '55')) {
             $ddd = substr($cleanedNumber, 2, 2); // Pega o DDD (ex: 62)
-            $restOfNumber = substr($cleanedNumber, 4); // Pega o restante do número
+            $localNumber = substr($cleanedNumber, 4); // Pega o restante do número
 
-            // Verifica se é um DDD de celular (DDD >= 30) e se o número tem 8 dígitos (sem o 9)
-            // e se o primeiro dígito do restante não é '9' (para evitar duplicar)
-            if (strlen($restOfNumber) === 8 && $ddd >= 30 && !str_starts_with($restOfNumber, '9')) {
+            // Se o número local tem 8 dígitos (total 12 com DDI+DDD),
+            // e é um DDD de celular (geralmente >= 30, mas pode variar, então focamos no comprimento)
+            // e o primeiro dígito do número local NÃO é '9', adicionamos o '9'.
+            // Ex: 556281234567 -> 5562981234567
+            // Se o número local tem 8 dígitos e JÁ começa com '9' (como no seu log 94123173),
+            // isso indica que o número do webhook está no formato antigo de 8 dígitos para celular
+            // e precisa do 9º dígito.
+            if (strlen($localNumber) === 8) {
                 // Adiciona o '9' após o DDD
-                return '55' . $ddd . '9' . $restOfNumber;
+                return '55' . $ddd . '9' . $localNumber;
             }
         }
 
