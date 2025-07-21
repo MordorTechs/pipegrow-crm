@@ -118,7 +118,8 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $defaultStage = null;
 
                 if ($defaultPipeline) {
-                    $defaultStage = Stage::where('pipeline_id', $defaultPipeline->id)->orderBy('sort_order')->first();
+                    // CORREÇÃO AQUI: Usar 'lead_pipeline_id' em vez de 'pipeline_id'
+                    $defaultStage = Stage::where('lead_pipeline_id', $defaultPipeline->id)->orderBy('sort_order')->first();
                 }
 
                 $whatsappSource = Source::firstOrCreate(['name' => 'WhatsApp'], ['code' => 'whatsapp']);
@@ -234,7 +235,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         Mensagem do cliente: \"{$message}\"";
 
         try {
-            $response = Http::post($apiUrl, [
+            $response = Http::timeout(60)->post($apiUrl, [ // Aumentado o tempo limite para 60 segundos
                 'contents' => [
                     [
                         'parts' => [
@@ -243,34 +244,34 @@ class ProcessWhatsappMessage implements ShouldQueue
                     ]
                 ],
                 'generationConfig' => [
-                    'responseMimeType' => 'application/json',
-                    'responseSchema'   => [
-                        'type'       => 'OBJECT',
-                        'properties' => [
-                            'pre_attendance_text' => ['type' => 'STRING'],
-                            'contact_name'        => ['type' => 'STRING'],
-                            'contact_email'       => ['type' => 'STRING'],
-                            'spin_data'           => [
-                                'type'       => 'OBJECT',
-                                'properties' => [
-                                    'situacao'   => ['type' => 'STRING'],
-                                    'problema'   => ['type' => 'STRING'],
-                                    'implicacao' => ['type' => 'STRING'],
-                                    'necessidade' => ['type' => 'STRING'],
+                    'responseMimeType' => "application/json",
+                    "responseSchema" => [
+                        "type" => "OBJECT",
+                        "properties" => [
+                            "pre_attendance_text" => ["type" => "STRING"],
+                            "contact_name" => ["type" => "STRING"],
+                            "contact_email" => ["type" => "STRING"],
+                            "spin_data" => [
+                                "type" => "OBJECT",
+                                "properties" => [
+                                    "situacao" => ["type" => "STRING"],
+                                    "problema" => ["type" => "STRING"],
+                                    "implicacao" => ["type" => "STRING"],
+                                    "necessidade" => ["type" => "STRING"],
                                 ],
                             ],
-                            'bant_data'           => [
-                                'type'       => 'OBJECT',
-                                'properties' => [
-                                    'budget'    => ['type' => 'STRING'],
-                                    'authority' => ['type' => 'STRING'],
-                                    'need'      => ['type' => 'STRING'],
-                                    'timeline'  => ['type' => 'STRING'],
+                            "bant_data" => [
+                                "type" => "OBJECT",
+                                "properties" => [
+                                    "budget" => ["type" => "STRING"],
+                                    "authority" => ["type" => "STRING"],
+                                    "need" => ["type" => "STRING"],
+                                    "timeline" => ["type" => "STRING"],
                                 ],
                             ],
                         ],
-                        'propertyOrdering' => [
-                            'pre_attendance_text', 'contact_name', 'contact_email', 'spin_data', 'bant_data'
+                        "propertyOrdering" => [
+                            "pre_attendance_text", "contact_name", "contact_email", "spin_data", "bant_data"
                         ],
                     ],
                 ],
