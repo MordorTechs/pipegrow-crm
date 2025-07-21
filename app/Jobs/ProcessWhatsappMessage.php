@@ -397,15 +397,16 @@ class ProcessWhatsappMessage implements ShouldQueue
         2.  **Se o nome do cliente não for conhecido ('Não conhecido'):** Pergunte o nome completo do cliente.
         3.  **Se o nome do cliente for conhecido, mas o nome da empresa não ('Não conhecido'):** Pergunte o nome da empresa do cliente.
         4.  **Se o nome e a empresa forem conhecidos:** Inicie a qualificação SPIN.
-            * **Situação:** Faça perguntas para entender a situação atual do cliente. Ex: 'Como você gerencia seus processos de vendas atualmente?'
-            * **Problema:** Identifique os problemas ou desafios que o cliente enfrenta. Ex: 'Quais são os maiores desafios que sua equipe de vendas enfrenta?'
-            * **Implicação:** Ajude o cliente a perceber as consequências dos problemas. Ex: 'Como esses desafios impactam seus resultados de vendas?'
-            * **Necessidade de Solução:** Leve o cliente a expressar a necessidade de uma solução. Ex: 'O que você espera de uma nova ferramenta de CRM?'
+            * **Situação (S):** Faça perguntas para entender a situação atual do cliente. Ex: 'Como você gerencia seus processos de vendas atualmente?'
+            * **Problema (P):** Identifique os problemas ou desafios que o cliente enfrenta. Ex: 'Quais são os maiores desafios que sua equipe de vendas enfrenta?'
+            * **Implicação (I):** Ajude o cliente a perceber as consequências dos problemas. Ex: 'Como esses desafios impactam seus resultados de vendas?'
+            * **Necessidade de Solução (N):** Leve o cliente a expressar a necessidade de uma solução. Ex: 'O que você espera de uma nova ferramenta de CRM?'
         5.  **NÃO faça perguntas BANT.**
         6.  **NÃO peça e-mail.**
         7.  **Mantenha a conversa fluida e natural**, fazendo uma pergunta por vez, a menos que seja uma saudação inicial.
         8.  **Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO**, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. Certifique-se de que TODAS as chaves JSON esperadas estejam presentes, mesmo que com valor 'Não qualificado' ou 'Não conhecido'.
-        9.  **Se já tiver todas as informações (nome, empresa e qualificação SPIN completa):** Informe que um especialista entrará em contato em breve.
+        9.  **Os valores de 'spin_data' devem conter APENAS a informação qualificada ou 'Não qualificado'**, sem incluir perguntas ou exemplos. As perguntas devem ser parte do 'pre_attendance_text'.
+        10. **Se já tiver todas as informações (nome, empresa e qualificação SPIN completa):** Informe que um especialista entrará em contato em breve.
 
         Contexto atual:
         - Nome do cliente: '{$knownContactName}'
