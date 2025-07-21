@@ -57,6 +57,10 @@ class ProcessWhatsappMessage implements ShouldQueue
                 return;
             }
 
+            // --- Formatar número de telefone brasileiro se necessário ---
+            $from = $this->formatBrazilianPhoneNumber($from);
+            Log::info('Número de telefone formatado:', ['from' => $from]);
+
             // --- Extrair nome do contato do payload do webhook (se disponível) ---
             $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
 
@@ -273,6 +277,33 @@ class ProcessWhatsappMessage implements ShouldQueue
                 'exception' => $e
             ]);
         }
+    }
+
+    /**
+     * Formata um número de telefone brasileiro para incluir o '9' adicional, se necessário.
+     *
+     * @param string $phoneNumber O número de telefone a ser formatado.
+     * @return string O número de telefone formatado.
+     */
+    protected function formatBrazilianPhoneNumber(string $phoneNumber): string
+    {
+        // Remove tudo que não for dígito
+        $cleanedNumber = preg_replace('/\D/', '', $phoneNumber);
+
+        // Verifica se é um número brasileiro (começa com 55)
+        if (str_starts_with($cleanedNumber, '55')) {
+            $ddd = substr($cleanedNumber, 2, 2); // Pega o DDD (ex: 62)
+            $restOfNumber = substr($cleanedNumber, 4); // Pega o restante do número
+
+            // Verifica se é um DDD de celular (DDD >= 30) e se o número tem 8 dígitos (sem o 9)
+            // e se o primeiro dígito do restante não é '9' (para evitar duplicar)
+            if (strlen($restOfNumber) === 8 && $ddd >= 30 && !str_starts_with($restOfNumber, '9')) {
+                // Adiciona o '9' após o DDD
+                return '55' . $ddd . '9' . $restOfNumber;
+            }
+        }
+
+        return $cleanedNumber; // Retorna o número limpo se não for brasileiro ou já estiver formatado
     }
 
     /**
