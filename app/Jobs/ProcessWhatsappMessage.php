@@ -72,6 +72,10 @@ class ProcessWhatsappMessage implements ShouldQueue
             $from = $this->formatBrazilianPhoneNumber($from);
             Log::info('Número de telefone formatado:', ['original' => $originalFrom, 'formatted' => $from]);
 
+            // --- Gerenciamento de estado da conversa ---
+            $cacheKeyConversationState = 'whatsapp_conversation_state_' . $from;
+            $conversationState = Cache::get($cacheKeyConversationState, 'awaiting_name'); // Estado inicial
+
             // --- Extrair nome do contato do payload do webhook (se disponível) ---
             $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
             
@@ -79,7 +83,7 @@ class ProcessWhatsappMessage implements ShouldQueue
             $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
             $knownContactNameForGemini = 'Não conhecido';
             $knownContactEmailForGemini = 'Não conhecido';
-            $knownContactCompanyForGemini = 'Não conhecido'; // Adicionado para o nome da empresa
+            $knownContactCompanyForGemini = 'Não conhecido';
 
             if ($person) {
                 $knownContactNameForGemini = $person->name;
@@ -99,83 +103,62 @@ class ProcessWhatsappMessage implements ShouldQueue
                 Log::info('Pessoa não encontrada, Gemini irá começar a qualificação do zero.');
             }
 
-            // --- 1. Pré-atendimento com Gemini 2.5 ---
-            // Passamos o nome, email e empresa conhecidos e o número 'from' para o Gemini gerenciar o histórico
-            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $knownContactCompanyForGemini, $from);
+            // --- 1. Chamada ao Gemini 2.5 para extração de dados com base no estado atual ---
+            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $knownContactCompanyForGemini, $from, $conversationState);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
-            // Usar o nome do Gemini se for específico, caso contrário, usar o inicial ou o padrão
             $contactName = $geminiResponse['contact_name'] ?? null;
-            if (empty($contactName) || $contactName === 'Não conhecido' || $contactName === 'Não mencionado') {
-                $contactName = $initialContactName; // Volta para o nome do webhook ou padrão
-            }
+            $contactEmail = $geminiResponse['contact_email'] ?? null;
+            $contactCompany = $geminiResponse['contact_company'] ?? null;
             
-            // Garante que contactEmail seja uma string vazia se não for válido
-            $contactEmail = $geminiResponse['contact_email'] ?? '';
-            if ($contactEmail === 'Não conhecido' || $contactEmail === 'Não mencionado') {
-                $contactEmail = '';
-            }
+            // Garante que contactEmail e contactCompany sejam strings vazias se não forem válidos
+            $contactEmail = (empty($contactEmail) || $contactEmail === 'Não conhecido' || $contactEmail === 'Não mencionado') ? '' : $contactEmail;
+            $contactCompany = (empty($contactCompany) || $contactCompany === 'Não conhecido' || $contactCompany === 'Não mencionado') ? '' : $contactCompany;
 
-            // Garante que contactCompany seja uma string vazia se não for válido
-            $contactCompany = $geminiResponse['contact_company'] ?? '';
-            if (empty($contactCompany) || $contactCompany === 'Não conhecido' || $contactCompany === 'Não mencionado') {
-                $contactCompany = '';
-            }
-            
-            $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
-
-
-            // --- 2. (Re)Tente encontrar ou criar uma pessoa (contato) após a resposta do Gemini ---
-            // Isso é importante caso o Gemini tenha extraído um nome/email/empresa que ainda não estava no CRM.
+            // --- Lógica de atualização de Pessoa e Organização ---
             if (!$person) {
                 Log::info('Pessoa não encontrada, criando nova pessoa para o número: ' . $from);
                 $defaultUser = User::first(); 
 
                 $personData = [
-                    'name'            => $contactName, 
-                    // Garante que contact_numbers seja um JSON array, mesmo que vazio
+                    'name'            => !empty($contactName) ? $contactName : $initialContactName, 
                     'contact_numbers' => json_encode([['value' => $from, 'label' => 'mobile']]),
                     'user_id'         => $defaultUser->id ?? null,
+                    'emails'          => json_encode(!empty($contactEmail) ? [['value' => $contactEmail, 'label' => 'work']] : []),
                 ];
-
-                // Garante que emails seja um JSON array, mesmo que vazio
-                if (!empty($contactEmail)) {
-                    $personData['emails'] = json_encode([['value' => $contactEmail, 'label' => 'work']]);
-                } else {
-                    $personData['emails'] = json_encode([]);
-                }
-
                 $person = Person::create($personData);
 
                 if (!$defaultUser) {
                     Log::warning('Nenhum usuário padrão encontrado para atribuir a nova pessoa. A pessoa foi criada sem atribuição de usuário.');
                 }
             } else {
-                // Se a pessoa já existia, tenta atualizar o nome se o Gemini forneceu um nome mais específico
-                if ($contactName !== $person->name && !str_starts_with($contactName, 'Cliente WhatsApp ')) {
+                // Atualiza o nome da pessoa se o Gemini forneceu um nome mais específico
+                if (!empty($contactName) && $contactName !== $person->name && !str_starts_with($contactName, 'Cliente WhatsApp ')) {
                     $person->update(['name' => $contactName]);
                     Log::info('Nome da pessoa atualizado pelo Gemini: ' . $contactName);
                 }
                 // Tenta atualizar o email se o Gemini forneceu um email e ele ainda não existe
-                if (!empty($contactEmail) && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
+                if (!empty($contactEmail)) {
                     $emails = json_decode($person->emails, true) ?? [];
-                    $emails[] = ['value' => $contactEmail, 'label' => 'work'];
-                    $person->update(['emails' => json_encode($emails)]);
-                    Log::info('Email da pessoa adicionado/atualizado pelo Gemini: ' . $contactEmail);
+                    if (!in_array($contactEmail, array_column($emails, 'value') ?? [])) {
+                        $emails[] = ['value' => $contactEmail, 'label' => 'work'];
+                        $person->update(['emails' => json_encode($emails)]);
+                        Log::info('Email da pessoa adicionado/atualizado pelo Gemini: ' . $contactEmail);
+                    }
                 }
-                // Tenta atualizar a organização se o Gemini forneceu um nome de empresa e ele ainda não está associado
-                if (!empty($contactCompany) && (!$person->organization || $person->organization->name !== $contactCompany)) {
-                    $organization = Organization::firstOrCreate(['name' => $contactCompany]);
+            }
+
+            // Lidar com a organização (empresa)
+            if (!empty($contactCompany)) {
+                $organization = Organization::firstOrCreate(['name' => $contactCompany]);
+                if ($person->organization_id !== $organization->id) {
                     $person->update(['organization_id' => $organization->id]);
                     Log::info('Pessoa associada à organização: ' . $organization->name);
                 }
-                Log::info('Pessoa existente processada: ' . $person->name);
             }
 
-            // --- Lidar com o nome da empresa (já feito no bloco acima) ---
 
-
-            // --- 3. Lógica para criar ou encontrar um lead associado a esta pessoa ---
+            // --- Lógica para criar ou encontrar um lead associado a esta pessoa ---
             $lead = Lead::where('person_id', $person->id)
                         ->whereIn('status', ['open', 'new'])
                         ->first();
@@ -194,7 +177,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $defaultType = Type::first();
 
                 $lead = Lead::create([
-                    'title'               => 'Lead WhatsApp de ' . $contactName . ($contactCompany ? ' (' . $contactCompany . ')' : ''),
+                    'title'               => 'Lead WhatsApp de ' . $person->name . (!empty($person->organization->name) ? ' (' . $person->organization->name . ')' : ''),
                     'lead_pipeline_id'    => $defaultPipeline->id ?? null,
                     'lead_pipeline_stage_id' => $defaultStage->id ?? null,
                     'lead_source_id'      => $whatsappSource->id ?? null,
@@ -212,10 +195,30 @@ class ProcessWhatsappMessage implements ShouldQueue
             } else {
                 Log::info('Lead existente encontrado para a pessoa: ' . $person->name);
                 // Atualiza o título do lead se o nome da empresa for coletado posteriormente
-                if ($contactCompany && !str_contains($lead->title, $contactCompany)) {
-                    $lead->update(['title' => 'Lead WhatsApp de ' . $contactName . ' (' . $contactCompany . ')']);
+                if (!empty($person->organization->name) && !str_contains($lead->title, $person->organization->name)) {
+                    $lead->update(['title' => 'Lead WhatsApp de ' . $person->name . ' (' . $person->organization->name . ')']);
                 }
             }
+
+            // --- Lógica para determinar a próxima mensagem e o próximo estado ---
+            $preAttendanceText = '';
+            $nextState = $conversationState;
+
+            if (empty($person->name) || $person->name === 'Não conhecido' || str_starts_with($person->name, 'Cliente WhatsApp ')) {
+                $preAttendanceText = "Olá! Qual é o seu nome completo?";
+                $nextState = 'awaiting_name';
+            } elseif (empty($person->organization_id) || $person->organization->name === 'Não conhecido') {
+                $preAttendanceText = "Olá, " . $person->name . "! Qual o nome da empresa que você representa?";
+                $nextState = 'awaiting_company';
+            } else {
+                // Se nome e empresa são conhecidos, a qualificação está completa para este fluxo simplificado
+                $preAttendanceText = "Ótimo, " . $person->name . " da " . $person->organization->name . "! Um especialista da PipeGrow CRM entrará em contato em breve para entender melhor suas necessidades. Obrigado!";
+                $nextState = 'completed';
+            }
+
+            // Salva o próximo estado da conversa no cache
+            Cache::put($cacheKeyConversationState, $nextState, now()->addMinutes(60));
+
 
             // --- 4. Adicionar a mensagem original e a resposta do Gemini como ATIVIDADES ---
             $activityData = [
@@ -238,25 +241,24 @@ class ProcessWhatsappMessage implements ShouldQueue
             Log::info('Mensagem original do WhatsApp adicionada como atividade.');
 
             $activityData['type'] = 'whatsapp_message_auto_response';
-            $activityData['description'] = 'Resposta do Gemini (pré-atendimento): ' . $preAttendanceText;
+            $activityData['description'] = 'Resposta do assistente: ' . $preAttendanceText;
             $activityData['schedule_from'] = now();
             $activityData['schedule_to'] = now();
 
             if ($lead) {
-                $activityData['title'] = 'Resposta Automática (Gemini) (Lead: ' . $lead->title . ')';
+                $activityData['title'] = 'Resposta Automática (Lead: ' . $lead->title . ')';
             } else {
-                $activityData['title'] = 'Resposta Automática (Gemini)';
+                $activityData['title'] = 'Resposta Automática';
             }
             Activity::create($activityData);
-            Log::info('Resposta do Gemini adicionada como atividade.');
-
-            // --- Removida a lógica de salvar dados de SPIN e BANT como ATIVIDADES ---
+            Log::info('Resposta do assistente adicionada como atividade.');
 
             Log::info('Processamento da mensagem do WhatsApp concluído.', [
                 'lead_id' => $lead->id ?? 'N/A (Lead não criado)',
                 'person_id' => $person->id,
                 'from' => $from,
-                'message' => $text
+                'message' => $text,
+                'current_state' => $nextState
             ]);
 
             // --- 6. Enviar resposta de volta para o WhatsApp ---
@@ -309,16 +311,17 @@ class ProcessWhatsappMessage implements ShouldQueue
     }
 
     /**
-     * Faz a chamada à API do Gemini 2.5 para pré-atendimento e qualificação.
+     * Faz a chamada à API do Gemini 2.5 para extrair dados com base no estado da conversa.
      *
      * @param string $message O texto da mensagem do usuário.
      * @param string $knownContactName O nome do contato já conhecido (do CRM).
      * @param string $knownContactEmail O email do contato já conhecido (do CRM).
      * @param string $knownContactCompany O nome da empresa do contato já conhecido (do CRM).
      * @param string $from O número de telefone formatado do remetente (para chave de cache).
+     * @param string $conversationState O estado atual da conversa (e.g., 'awaiting_name', 'awaiting_company').
      * @return array A resposta processada do Gemini.
      */
-    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, string $knownContactCompany, string $from): array
+    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, string $knownContactCompany, string $from, string $conversationState): array
     {
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
@@ -333,32 +336,34 @@ class ProcessWhatsappMessage implements ShouldQueue
         $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
         Log::info('Mensagem do usuário adicionada ao histórico ANTES da chamada Gemini.', ['from' => $from, 'history_length' => count($conversationHistory)]);
 
-        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é coletar o nome do cliente e o nome da empresa.
+        // Define a instrução do sistema com base no estado atual da conversa
+        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é extrair informações específicas do cliente com base no estado atual da conversa.
 
         Instruções gerais:
         - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
         - Certifique-se de que TODAS as chaves JSON esperadas (pre_attendance_text, contact_name, contact_email, contact_company) estejam presentes.
         - Os valores de 'contact_email' devem ser uma string vazia (\" \").
-        - Os valores de 'contact_name' e 'contact_company' devem ser o dado qualificado ou \"\" se não obtido.
-        - Mantenha a conversa fluida e natural, fazendo UMA pergunta por vez no 'pre_attendance_text'.
+        - Os valores de 'contact_name' e 'contact_company' devem ser o dado qualificado extraído da *última mensagem do cliente* ou \"\" se não obtido.
+        - O 'pre_attendance_text' deve ser uma confirmação da informação extraída ou uma saudação, NUNCA uma pergunta. A pergunta será gerada no backend.
 
-        Contexto atual do cliente (informações já conhecidas):
+        Contexto atual do cliente (informações já conhecidas do CRM):
         - Nome: '" . ($knownContactName === 'Não conhecido' ? '' : $knownContactName) . "'
         - Empresa: '" . ($knownContactCompany === 'Não conhecido' ? '' : $knownContactCompany) . "'
+        - Estado da conversa: '{$conversationState}'
 
-        Com base no contexto e na última mensagem do cliente: \"{$message}\", determine a próxima ação e preencha o JSON.
+        Com base na última mensagem do cliente: \"{$message}\", extraia a informação relevante para o estado '{$conversationState}' e preencha o JSON.
 
-        Lógica para 'pre_attendance_text' (a mensagem para o cliente):
-        1. Se o nome do cliente no contexto for vazio: Pergunte o nome completo.
-        2. Se o nome do cliente for conhecido, mas a empresa no contexto for vazia: Pergunte o nome da empresa.
-        3. Se nome e empresa forem conhecidos: Informe que um especialista entrará em contato em breve.
+        Lógica de extração baseada no estado:
+        - Se o estado for 'awaiting_name': Tente extrair o nome completo do cliente da última mensagem.
+        - Se o estado for 'awaiting_company': Tente extrair o nome da empresa da última mensagem.
+        - Se o estado for 'completed' ou outro: Apenas confirme o recebimento da mensagem.
 
         A estrutura JSON COMPLETA esperada é:
         {
-            \"pre_attendance_text\": \"<texto de pré-atendimento, contendo a próxima pergunta ou a finalização>\",
-            \"contact_name\": \"<nome do contato ou \"\">\",
+            \"pre_attendance_text\": \"<texto de confirmação ou saudação>\",
+            \"contact_name\": \"<nome do contato extraído ou \"\">\",
             \"contact_email\": \"\",
-            \"contact_company\": \"<nome da empresa ou \"\">\"
+            \"contact_company\": \"<nome da empresa extraído ou \"\">\"
         }
         ";
 
@@ -382,7 +387,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                             "pre_attendance_text" => ["type" => "STRING"],
                             "contact_name" => ["type" => "STRING"],
                             "contact_email" => ["type" => "STRING"],
-                            "contact_company" => ["type" => "STRING"], // Adicionado o nome da empresa
+                            "contact_company" => ["type" => "STRING"],
                         ],
                         "propertyOrdering" => [
                             "pre_attendance_text", "contact_name", "contact_email", "contact_company"
@@ -420,7 +425,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                         return $parsedJson;
                     } else {
                         Log::error('Erro ao decodificar JSON da resposta do Gemini: ' . json_last_error_msg(), ['json_string_after_cleaning' => $jsonString]);
-                        // Se o JSON for inválido, ainda salvamos o histórico com a mensagem do usuário
+                        // Se o JSON for inválido, ainda salvamos o histórico com o histórico atual
                         Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
                         return $this->getDefaultGeminiResponse();
                     }
@@ -430,12 +435,12 @@ class ProcessWhatsappMessage implements ShouldQueue
                     'status' => $response->status(),
                     'response' => $response->body()
                 ]);
-                // Se a chamada à API falhar, ainda salvamos o histórico com a mensagem do usuário
+                // Se a chamada à API falhar, ainda salvamos o histórico com o histórico atual
                 Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
             }
         } catch (\Exception $e) {
             Log::error('Exceção ao chamar a API do Gemini: ' . $e->getMessage());
-            // Se ocorrer uma exceção, ainda salvamos o histórico com a mensagem do usuário
+            // Se ocorrer uma exceção, ainda salvamos o histórico com o histórico atual
             Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
         }
 
@@ -452,8 +457,8 @@ class ProcessWhatsappMessage implements ShouldQueue
         return [
             'pre_attendance_text' => "Olá! Recebemos sua mensagem. Houve um pequeno problema na minha resposta, mas não se preocupe, um membro da nossa equipe entrará em contato em breve para te ajudar!",
             'contact_name'        => 'Não conhecido',
-            'contact_email'       => '', // Alterado para string vazia
-            'contact_company'     => '', // Alterado para string vazia
+            'contact_email'       => '',
+            'contact_company'     => '',
         ];
     }
 
