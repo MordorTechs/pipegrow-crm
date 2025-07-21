@@ -110,14 +110,16 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $contactName = $initialContactName; // Volta para o nome do webhook ou padrão
             }
             
-            $contactEmail = $geminiResponse['contact_email'] ?? null;
+            // Garante que contactEmail seja uma string vazia se não for válido
+            $contactEmail = $geminiResponse['contact_email'] ?? '';
             if ($contactEmail === 'Não conhecido' || $contactEmail === 'Não mencionado') {
-                $contactEmail = null;
+                $contactEmail = '';
             }
 
-            $contactCompany = $geminiResponse['contact_company'] ?? null; // Recupera o nome da empresa
+            // Garante que contactCompany seja uma string vazia se não for válido
+            $contactCompany = $geminiResponse['contact_company'] ?? '';
             if (empty($contactCompany) || $contactCompany === 'Não conhecido' || $contactCompany === 'Não mencionado') {
-                $contactCompany = null;
+                $contactCompany = '';
             }
             
             $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
@@ -131,11 +133,13 @@ class ProcessWhatsappMessage implements ShouldQueue
 
                 $personData = [
                     'name'            => $contactName, 
+                    // Garante que contact_numbers seja um JSON array, mesmo que vazio
                     'contact_numbers' => json_encode([['value' => $from, 'label' => 'mobile']]),
                     'user_id'         => $defaultUser->id ?? null,
                 ];
 
-                if ($contactEmail) {
+                // Garante que emails seja um JSON array, mesmo que vazio
+                if (!empty($contactEmail)) {
                     $personData['emails'] = json_encode([['value' => $contactEmail, 'label' => 'work']]);
                 } else {
                     $personData['emails'] = json_encode([]);
@@ -153,14 +157,14 @@ class ProcessWhatsappMessage implements ShouldQueue
                     Log::info('Nome da pessoa atualizado pelo Gemini: ' . $contactName);
                 }
                 // Tenta atualizar o email se o Gemini forneceu um email e ele ainda não existe
-                if ($contactEmail && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
+                if (!empty($contactEmail) && !in_array($contactEmail, array_column(json_decode($person->emails, true) ?? [], 'value'))) {
                     $emails = json_decode($person->emails, true) ?? [];
                     $emails[] = ['value' => $contactEmail, 'label' => 'work'];
                     $person->update(['emails' => json_encode($emails)]);
                     Log::info('Email da pessoa adicionado/atualizado pelo Gemini: ' . $contactEmail);
                 }
                 // Tenta atualizar a organização se o Gemini forneceu um nome de empresa e ele ainda não está associado
-                if ($contactCompany && (!$person->organization || $person->organization->name !== $contactCompany)) {
+                if (!empty($contactCompany) && (!$person->organization || $person->organization->name !== $contactCompany)) {
                     $organization = Organization::firstOrCreate(['name' => $contactCompany]);
                     $person->update(['organization_id' => $organization->id]);
                     Log::info('Pessoa associada à organização: ' . $organization->name);
