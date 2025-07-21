@@ -315,7 +315,18 @@ class ProcessWhatsappMessage implements ShouldQueue
                 if (isset($result['candidates'][0]['content']['parts'][0]['text'])) {
                     $jsonString = $result['candidates'][0]['content']['parts'][0]['text'];
 
-                    // Tentar remover caracteres de controle inválidos e espaços/quebras de linha extras
+                    // Tentar encontrar o início e o fim do objeto JSON
+                    $jsonStart = strpos($jsonString, '{');
+                    $jsonEnd = strrpos($jsonString, '}');
+
+                    if ($jsonStart !== false && $jsonEnd !== false) {
+                        $jsonString = substr($jsonString, $jsonStart, $jsonEnd - $jsonStart + 1);
+                    } else {
+                        Log::warning('Não foi possível encontrar um objeto JSON completo na resposta do Gemini.', ['raw_gemini_response_text' => $jsonString]);
+                        return $this->getDefaultGeminiResponse();
+                    }
+
+                    // Remover caracteres de controle inválidos e espaços/quebras de linha extras
                     $jsonString = preg_replace('/[[:cntrl:]]/', '', $jsonString); // Remove caracteres de controle
                     $jsonString = trim($jsonString); // Remove espaços em branco (incluindo quebras de linha) do início e fim
 
@@ -323,7 +334,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                     if (json_last_error() === JSON_ERROR_NONE) {
                         return $parsedJson;
                     } else {
-                        Log::error('Erro ao decodificar JSON da resposta do Gemini: ' . json_last_error_msg(), ['json_string' => $jsonString]);
+                        Log::error('Erro ao decodificar JSON da resposta do Gemini: ' . json_last_error_msg(), ['json_string_after_cleaning' => $jsonString]);
                         return $this->getDefaultGeminiResponse();
                     }
                 }
