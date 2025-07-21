@@ -166,36 +166,26 @@ class ProcessWhatsappMessage implements ShouldQueue
             if (!$lead) {
                 Log::info('Criando novo lead para a pessoa: ' . $person->name);
 
-                $defaultPipeline = Pipeline::first();
-                $defaultStage = null;
-
-                if ($defaultPipeline) {
-                    $defaultStage = Stage::where('lead_pipeline_id', $defaultPipeline->id)->orderBy('sort_order')->first();
-                }
-
                 $whatsappSource = Source::firstOrCreate(['name' => 'WhatsApp'], ['code' => 'whatsapp']);
-                $defaultType = Type::first();
-
+                
                 // Acessa o nome da organização de forma segura
                 $organizationNameForLead = optional($person->organization)->name;
                 $leadTitle = 'Lead WhatsApp de ' . $person->name . ($organizationNameForLead ? ' (' . $organizationNameForLead . ')' : '');
 
                 $lead = Lead::create([
                     'title'               => $leadTitle,
-                    'lead_pipeline_id'    => $defaultPipeline->id ?? null,
-                    'lead_pipeline_stage_id' => $defaultStage->id ?? null,
+                    'lead_pipeline_id'    => 1, // Valor fixo conforme solicitado
+                    'lead_pipeline_stage_id' => 1, // Valor fixo conforme solicitado
                     'lead_source_id'      => $whatsappSource->id ?? null,
-                    'lead_type_id'        => $defaultType->id ?? null,
-                    'user_id'             => $person->user_id,
+                    'lead_type_id'        => 1, // Valor fixo conforme solicitado
+                    'user_id'             => $person->user_id, // Mantém a atribuição ao user da pessoa
                     'person_id'           => $person->id,
                     'expected_close_date' => now()->addDays(7),
                     'status'              => 'new',
-                    'lead_value'          => 0,
+                    'lead_value'          => 0, // Valor fixo conforme solicitado
+                    'description'         => $text, // Adiciona a descrição do lead
                 ]);
 
-                if (!$defaultPipeline || !$defaultStage || !$defaultType) {
-                    Log::warning('Pipeline, Stage ou Type padrão não encontrados. O lead foi criado com valores padrão ou nulos.');
-                }
             } else {
                 Log::info('Lead existente encontrado para a pessoa: ' . $person->name);
                 // Atualiza o título do lead se o nome da empresa for coletado posteriormente
