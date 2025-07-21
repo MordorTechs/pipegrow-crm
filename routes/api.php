@@ -4,6 +4,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\WebhookLeadController;
 use App\Http\Controllers\FacebookWebhookController;
+use App\Http\Controllers\WhatsappWebhookController;
 /*
 |--------------------------------------------------------------------------
 | API Routes
