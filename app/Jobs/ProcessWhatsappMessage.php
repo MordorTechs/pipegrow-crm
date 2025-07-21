@@ -28,7 +28,7 @@ class ProcessWhatsappMessage implements ShouldQueue
     protected $messageData;
 
     /**
-     * Create a new job instance.
+     * Cria uma nova instância do job.
      *
      * @param array $messageData O payload da mensagem do WhatsApp.
      * @return void
@@ -39,7 +39,7 @@ class ProcessWhatsappMessage implements ShouldQueue
     }
 
     /**
-     * Execute the job.
+     * Executa o job.
      *
      * @return void
      */
@@ -352,6 +352,11 @@ class ProcessWhatsappMessage implements ShouldQueue
         $conversationHistory = Cache::get($cacheKeyConversation, []);
         Log::info('Histórico de conversa carregado do cache em callGeminiAPI:', ['from' => $from, 'history_length' => count($conversationHistory)]);
 
+        // Adiciona a mensagem atual do usuário ao histórico ANTES de enviar para o Gemini
+        // Isso garante que a mensagem do usuário esteja sempre no histórico, mesmo que a API do Gemini falhe.
+        $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
+        Log::info('Mensagem do usuário adicionada ao histórico ANTES da chamada Gemini.', ['from' => $from, 'history_length' => count($conversationHistory)]);
+
         // Prompt simplificado para focar apenas no nome e na mensagem de contato
         $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp. Seu único objetivo é:
         1.  Cumprimentar o cliente.
@@ -373,23 +378,13 @@ class ProcessWhatsappMessage implements ShouldQueue
         ";
 
         // Constrói o array 'contents' para a API do Gemini
-        $contents = [];
-
-        // Adiciona a instrução do sistema como o primeiro turno 'user' se o histórico estiver vazio
+        // Adiciona a instrução do sistema como o primeiro turno 'user' se o histórico estiver vazio ou se a instrução mudou
         if (empty($conversationHistory) || !isset($conversationHistory[0]['parts'][0]['text']) || $conversationHistory[0]['parts'][0]['text'] !== $systemInstructionText) {
-            $contents[] = ['role' => 'user', 'parts' => [['text' => $systemInstructionText]]];
+            array_unshift($conversationHistory, ['role' => 'user', 'parts' => [['text' => $systemInstructionText]]]);
         }
         
-        // Adiciona os turnos existentes do histórico (se houver e se já não adicionamos a instrução)
-        foreach ($conversationHistory as $turn) {
-            if ($turn['role'] === 'user' && isset($turn['parts'][0]['text']) && $turn['parts'][0]['text'] === $systemInstructionText) {
-                continue; // Evita adicionar a instrução do sistema novamente
-            }
-            $contents[] = $turn;
-        }
-
-        // Adiciona a mensagem atual do usuário como o último turno 'user'
-        $contents[] = ['role' => 'user', 'parts' => [['text' => "Mensagem do cliente: \"{$message}\""]]];
+        // Usa o histórico de conversa (que agora inclui a mensagem do usuário) para construir o payload para o Gemini
+        $contents = $conversationHistory;
 
         try {
             $response = Http::timeout(60)->post($apiUrl, [ // Aumentado o tempo limite para 60 segundos
@@ -442,13 +437,14 @@ class ProcessWhatsappMessage implements ShouldQueue
                         $jsonString = substr($jsonString, $jsonStart, $jsonEnd - $jsonStart + 1);
                     } else {
                         Log::warning('Não foi possível encontrar um objeto JSON completo na resposta do Gemini.', ['raw_gemini_response_text' => $jsonString]);
+                        // Se o JSON for inválido, ainda salvamos o histórico com a mensagem do usuário
+                        Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
                         return $this->getDefaultGeminiResponse();
                     }
 
                     $parsedJson = json_decode($jsonString, true);
                     if (json_last_error() === JSON_ERROR_NONE) {
-                        // Salva o histórico da conversa no cache APENAS se o JSON for válido
-                        $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
+                        // Adiciona a resposta do modelo ao histórico
                         $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $parsedJson['pre_attendance_text']]]];
                         Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60)); // Define um tempo de vida para o cache (ex: 60 minutos)
                         Log::info('Histórico da conversa atualizado no cache em callGeminiAPI.', ['from' => $from, 'history_length' => count($conversationHistory)]);
@@ -456,6 +452,8 @@ class ProcessWhatsappMessage implements ShouldQueue
                         return $parsedJson;
                     } else {
                         Log::error('Erro ao decodificar JSON da resposta do Gemini: ' . json_last_error_msg(), ['json_string_after_cleaning' => $jsonString]);
+                        // Se o JSON for inválido, ainda salvamos o histórico com a mensagem do usuário
+                        Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
                         return $this->getDefaultGeminiResponse();
                     }
                 }
@@ -464,9 +462,13 @@ class ProcessWhatsappMessage implements ShouldQueue
                     'status' => $response->status(),
                     'response' => $response->body()
                 ]);
+                // Se a chamada à API falhar, ainda salvamos o histórico com a mensagem do usuário
+                Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
             }
         } catch (\Exception $e) {
             Log::error('Exceção ao chamar a API do Gemini: ' . $e->getMessage());
+            // Se ocorrer uma exceção, ainda salvamos o histórico com a mensagem do usuário
+            Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
         }
 
         return $this->getDefaultGeminiResponse();
@@ -481,8 +483,8 @@ class ProcessWhatsappMessage implements ShouldQueue
     {
         return [
             'pre_attendance_text' => "Olá! Recebemos sua mensagem. Para que eu possa te ajudar melhor, poderia me dizer qual é o seu nome completo?",
-            'contact_name'        => 'Não conhecido', // Alterado para 'Não conhecido'
-            'contact_email'       => 'Não conhecido', // Alterado para 'Não conhecido'
+            'contact_name'        => 'Não conhecido',
+            'contact_email'       => 'Não conhecido',
             'spin_data'           => [
                 'situacao'   => 'Não qualificado',
                 'problema'   => 'Não qualificado',
@@ -508,13 +510,12 @@ class ProcessWhatsappMessage implements ShouldQueue
     protected function sendWhatsappMessage(string $to, string $message): void
     {
         $accessToken = env('WHATSAPP_ACCESS_TOKEN');
-        $phoneNumberId = env('WHATSAPP_PHONE_NUMBER_ID'); // ID do seu número de telefone do WhatsApp Business API
+        $phoneNumberId = env('WHATSAPP_PHONE_NUMBER_ID');
 
-        // Adicionado log para depuração
         Log::info('Tentando enviar mensagem WhatsApp com:', [
             'to' => $to,
             'phoneNumberId' => $phoneNumberId,
-            'accessToken_present' => !empty($accessToken) // Apenas verifica se está presente, não loga o token completo
+            'accessToken_present' => !empty($accessToken)
         ]);
 
         if (!$accessToken || !$phoneNumberId) {
@@ -522,7 +523,7 @@ class ProcessWhatsappMessage implements ShouldQueue
             return;
         }
 
-        $url = "https://graph.facebook.com/v19.0/{$phoneNumberId}/messages"; // Use a versão mais recente da API se necessário
+        $url = "https://graph.facebook.com/v19.0/{$phoneNumberId}/messages";
 
         try {
             $response = Http::withHeaders([
