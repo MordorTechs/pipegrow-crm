@@ -9,6 +9,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http; // Para fazer requisições HTTP (para Gemini e WhatsApp)
+use Illuminate\Support\Facades\Cache; // Para idempotência
 
 // Importe os modelos necessários para interagir com o CRM
 use Webkul\Contact\Models\Person;
@@ -44,11 +45,19 @@ class ProcessWhatsappMessage implements ShouldQueue
      */
     public function handle()
     {
+        // Chave de idempotência para evitar processamento duplicado
+        $messageId = $this->messageData['id'] ?? null;
+        $cacheKey = 'whatsapp_message_processed_' . $messageId;
+
+        if ($messageId && Cache::has($cacheKey)) {
+            Log::info('Mensagem do WhatsApp já processada (idempotência): ' . $messageId);
+            return;
+        }
+
         Log::info('Processando mensagem do WhatsApp:', $this->messageData);
 
         try {
             $from = $this->messageData['from'] ?? null; // Número de telefone do remetente
-            $messageId = $this->messageData['id'] ?? null; // ID da mensagem
             $text = $this->messageData['text']['body'] ?? null; // Conteúdo da mensagem de texto
             $timestamp = $this->messageData['timestamp'] ?? null; // Timestamp da mensagem
 
@@ -58,8 +67,9 @@ class ProcessWhatsappMessage implements ShouldQueue
             }
 
             // --- Formatar número de telefone brasileiro se necessário ---
+            $originalFrom = $from;
             $from = $this->formatBrazilianPhoneNumber($from);
-            Log::info('Número de telefone formatado:', ['from' => $from]);
+            Log::info('Número de telefone formatado:', ['original' => $originalFrom, 'formatted' => $from]);
 
             // --- Extrair nome do contato do payload do webhook (se disponível) ---
             $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
@@ -271,6 +281,11 @@ class ProcessWhatsappMessage implements ShouldQueue
             // --- 6. Enviar resposta de volta para o WhatsApp ---
             $this->sendWhatsappMessage($from, $preAttendanceText);
 
+            // Marca a mensagem como processada no cache
+            if ($messageId) {
+                Cache::put($cacheKey, true, now()->addMinutes(60)); // Armazena por 60 minutos
+            }
+
         } catch (\Exception $e) {
             Log::error('Erro ao processar mensagem do WhatsApp: ' . $e->getMessage(), [
                 'message_data' => $this->messageData,
@@ -287,27 +302,28 @@ class ProcessWhatsappMessage implements ShouldQueue
      */
     protected function formatBrazilianPhoneNumber(string $phoneNumber): string
     {
+        Log::info('formatBrazilianPhoneNumber: Input received', ['phoneNumber' => $phoneNumber]);
         // Remove tudo que não for dígito
         $cleanedNumber = preg_replace('/\D/', '', $phoneNumber);
+        Log::info('formatBrazilianPhoneNumber: Cleaned number', ['cleanedNumber' => $cleanedNumber]);
 
         // Verifica se é um número brasileiro (começa com 55)
         if (str_starts_with($cleanedNumber, '55')) {
             $ddd = substr($cleanedNumber, 2, 2); // Pega o DDD (ex: 62)
             $localNumber = substr($cleanedNumber, 4); // Pega o restante do número
+            Log::info('formatBrazilianPhoneNumber: Brazilian number detected', ['ddd' => $ddd, 'localNumber' => $localNumber]);
 
             // Se o número local tem 8 dígitos (total 12 com DDI+DDD),
-            // e é um DDD de celular (geralmente >= 30, mas pode variar, então focamos no comprimento)
-            // e o primeiro dígito do número local NÃO é '9', adicionamos o '9'.
-            // Ex: 556281234567 -> 5562981234567
-            // Se o número local tem 8 dígitos e JÁ começa com '9' (como no seu log 94123173),
-            // isso indica que o número do webhook está no formato antigo de 8 dígitos para celular
-            // e precisa do 9º dígito.
+            // ele é um número de celular antigo ou um fixo que precisa do 9º dígito para ser um celular.
+            // A API do WhatsApp exige 13 dígitos para celulares brasileiros.
             if (strlen($localNumber) === 8) {
-                // Adiciona o '9' após o DDD
-                return '55' . $ddd . '9' . $localNumber;
+                $formattedNumber = '55' . $ddd . '9' . $localNumber;
+                Log::info('formatBrazilianPhoneNumber: Added 9th digit', ['formattedNumber' => $formattedNumber]);
+                return $formattedNumber;
             }
         }
 
+        Log::info('formatBrazilianPhoneNumber: No 9th digit added or not Brazilian', ['finalNumber' => $cleanedNumber]);
         return $cleanedNumber; // Retorna o número limpo se não for brasileiro ou já estiver formatado
     }
 
@@ -322,7 +338,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
-        // Prompt aprimorado para ser mais explícito sobre a saída JSON pura
+        // Prompt aprimorado para ser mais explícito sobre a saída JSON pura e concisa
         $prompt = "Você é um assistente de pré-atendimento de vendas. Analise a seguinte mensagem de um cliente via WhatsApp. Extraia as seguintes informações:
         - Nome completo do cliente (se disponível)
         - Endereço de e-mail do cliente (se disponível)
@@ -332,13 +348,13 @@ class ProcessWhatsappMessage implements ShouldQueue
         Com base na análise, crie um texto de pré-atendimento amigável e profissional para o cliente, buscando mais informações para qualificá-lo.
 
         Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. As chaves do JSON devem ser:
-        - 'pre_attendance_text': O texto de pré-atendimento para o cliente.
+        - 'pre_attendance_text': O texto de pré-atendimento para o cliente. Se a mensagem for muito genérica, faça uma pergunta aberta para coletar mais informações.
         - 'contact_name': O nome completo do cliente.
         - 'contact_email': O e-mail do cliente.
-        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'.
-        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'.
+        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara.
+        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara.
 
-        Se alguma informação não for encontrada, use 'Não mencionado' ou 'A ser qualificado'.
+        Se alguma informação não for encontrada, use 'Não mencionado' ou 'A ser qualificado' para os campos de nome e e-mail. Para os campos de 'spin_data' e 'bant_data', use 'Não qualificado' se a informação não for clara na mensagem.
 
         Mensagem do cliente: \"{$message}\"";
 
