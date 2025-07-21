@@ -56,11 +56,20 @@ class WhatsappWebhookController extends Controller
         if (isset($body['object']) && $body['object'] === 'whatsapp_business_account') {
             foreach ($body['entry'] as $entry) {
                 foreach ($entry['changes'] as $change) {
-                    if ($change['field'] === 'messages') {
-                        foreach ($change['value']['messages'] as $message) {
-                            // Despacha o job para processar a mensagem em segundo plano
-                            ProcessWhatsappMessage::dispatch($message);
-                            Log::info('Job ProcessWhatsappMessage despachado para mensagem:', ['message_id' => $message['id'] ?? 'N/A']);
+                    // Adiciona verificação para a chave 'value' e 'messages' ou 'statuses'
+                    if (isset($change['value'])) {
+                        if ($change['field'] === 'messages' && isset($change['value']['messages'])) {
+                            foreach ($change['value']['messages'] as $message) {
+                                // Despacha o job para processar a mensagem em segundo plano
+                                ProcessWhatsappMessage::dispatch($message);
+                                Log::info('Job ProcessWhatsappMessage despachado para mensagem:', ['message_id' => $message['id'] ?? 'N/A']);
+                            }
+                        } elseif ($change['field'] === 'messages' && isset($change['value']['statuses'])) {
+                            // Este bloco lida com notificações de status (entregue, lido)
+                            foreach ($change['value']['statuses'] as $status) {
+                                Log::info('Notificação de status do WhatsApp recebida:', ['status_id' => $status['id'] ?? 'N/A', 'status' => $status['status'] ?? 'N/A']);
+                                // Você pode adicionar lógica para processar status aqui, se necessário
+                            }
                         }
                     }
                 }
@@ -68,7 +77,7 @@ class WhatsappWebhookController extends Controller
             return response('EVENT_RECEIVED', 200);
         }
 
-        Log::warning('Payload do WhatsApp Webhook inválido ou não contém mensagens.');
+        Log::warning('Payload do WhatsApp Webhook inválido ou não contém dados esperados.');
         return response('Bad Request', 400);
     }
 }
