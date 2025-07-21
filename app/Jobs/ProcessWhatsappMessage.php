@@ -2,25 +2,16 @@
 
 namespace App\Jobs;
 
+use App\Models\Lead;
+use App\Models\WhatsappSession;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Http; // Para fazer requisições HTTP (para Gemini e WhatsApp)
-use Illuminate\Support\Facades\Cache; // Para usar o sistema de cache do Laravel
-
-// Importe os modelos necessários para interagir com o CRM
-use Webkul\Contact\Models\Person;
-use Webkul\Contact\Models\Organization; // Adicionado para lidar com o nome da empresa
-use Webkul\Lead\Models\Lead;
-use Webkul\Lead\Models\Source;
-use Webkul\Lead\Models\Type;
-use Webkul\Lead\Models\Pipeline;
-use Webkul\Lead\Models\Stage;
-use Webkul\User\Models\User;
-use Webkul\Activity\Models\Activity; // Usaremos o modelo Activity diretamente para criar a atividade
+use Illuminate\Support\Facades\Http; // For making HTTP requests to Gemini API
+use Exception; // For error handling
 
 class ProcessWhatsappMessage implements ShouldQueue
 {
@@ -29,9 +20,9 @@ class ProcessWhatsappMessage implements ShouldQueue
     protected $messageData;
 
     /**
-     * Cria uma nova instância do job.
+     * Create a new job instance.
      *
-     * @param array $messageData O payload da mensagem do WhatsApp.
+     * @param array $messageData The incoming WhatsApp message data.
      * @return void
      */
     public function __construct(array $messageData)
@@ -40,517 +31,418 @@ class ProcessWhatsappMessage implements ShouldQueue
     }
 
     /**
-     * Executa o job.
+     * Execute the job.
+     *
+     * This method handles the incoming WhatsApp message, manages the conversation state
+     * for lead qualification (SPIN/BANT), interacts with the Gemini API for personalized
+     * responses, and conditionally creates a lead in the database.
      *
      * @return void
      */
-    public function handle()
+    public function handle(): void
     {
-        // Chave de idempotência para evitar processamento duplicado
-        $messageId = $this->messageData['id'] ?? null;
-        $cacheKeyIdempotency = 'whatsapp_message_processed_' . $messageId;
+        $from = $this->messageData['from'];
+        $text = $this->messageData['text'];
 
-        if ($messageId && Cache::has($cacheKeyIdempotency)) {
-            Log::info('Mensagem do WhatsApp já processada (idempotência): ' . $messageId);
-            return;
-        }
+        Log::info("ProcessWhatsappMessage: Received message from {$from}: {$text}");
 
-        Log::info('Processando mensagem do WhatsApp:', $this->messageData);
+        // Find or create a WhatsApp session for the user
+        $session = WhatsappSession::firstOrCreate(
+            ['phone_number' => $from],
+            [
+                'conversation_history' => [],
+                'qualification_data'   => [],
+                'current_stage'        => 'initial',
+            ]
+        );
+
+        // Append the user's message to the conversation history
+        $history = $session->conversation_history ?? [];
+        $history[] = ['role' => 'user', 'parts' => [['text' => $text]]];
+        $session->conversation_history = $history;
+
+        $responseMessage = '';
 
         try {
-            $from = $this->messageData['from'] ?? null; // Número de telefone do remetente
-            $text = $this->messageData['text']['body'] ?? null; // Conteúdo da mensagem de texto
-            $timestamp = $this->messageData['timestamp'] ?? null; // Timestamp da mensagem
+            // Determine the next step based on the current stage
+            switch ($session->current_stage) {
+                case 'initial':
+                    $responseMessage = $this->askSpinQuestion('S', $session);
+                    $session->current_stage = 'spin_s';
+                    break;
 
-            if (!$from || !$text) {
-                Log::warning('Mensagem do WhatsApp ignorada: Remetente ou texto ausente.', $this->messageData);
-                return;
-            }
+                case 'spin_s':
+                    $session->qualification_data = array_merge($session->qualification_data, ['spin_situation' => $text]);
+                    $responseMessage = $this->askSpinQuestion('P', $session);
+                    $session->current_stage = 'spin_p';
+                    break;
 
-            // --- Formatar número de telefone brasileiro se necessário ---
-            $originalFrom = $from;
-            $from = $this->formatBrazilianPhoneNumber($from);
-            Log::info('Número de telefone formatado:', ['original' => $originalFrom, 'formatted' => $from]);
+                case 'spin_p':
+                    $session->qualification_data = array_merge($session->qualification_data, ['spin_problem' => $text]);
+                    $responseMessage = $this->askSpinQuestion('I', $session);
+                    $session->current_stage = 'spin_i';
+                    break;
 
-            // --- Gerenciamento de estado da conversa ---
-            $cacheKeyConversationState = 'whatsapp_conversation_state_' . $from;
-            $conversationState = Cache::get($cacheKeyConversationState, 'initial_greeting'); // Estado inicial: saudação
+                case 'spin_i':
+                    $session->qualification_data = array_merge($session->qualification_data, ['spin_implication' => $text]);
+                    $responseMessage = $this->askSpinQuestion('N', $session);
+                    $session->current_stage = 'spin_n';
+                    break;
 
-            // --- Extrair nome do contato do payload do webhook (se disponível) ---
-            $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
-            
-            // --- Tente encontrar a pessoa (contato) no CRM ---
-            $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
-            
-            // Prepara o contexto para o Gemini com base nos dados ATUAIS da pessoa (se existir)
-            $knownContactNameForGemini = optional($person)->name ?? 'Não conhecido';
-            $knownContactEmailForGemini = (json_decode(optional($person)->emails, true)[0]['value'] ?? null) ?? 'Não conhecido';
-            $knownContactCompanyForGemini = optional(optional($person)->organization)->name ?? 'Não conhecido';
+                case 'spin_n':
+                    $session->qualification_data = array_merge($session->qualification_data, ['spin_need_payoff' => $text]);
+                    $responseMessage = $this->askBantQuestion('B', $session);
+                    $session->current_stage = 'bant_b';
+                    break;
 
-            Log::info('Pessoa existente encontrada para Gemini context:', [
-                'name' => $knownContactNameForGemini,
-                'email' => $knownContactEmailForGemini,
-                'company' => $knownContactCompanyForGemini
-            ]);
-            
-            // --- 1. Chamada ao Gemini 2.5 para extração de dados da última mensagem ---
-            // O Gemini agora focará apenas na extração de dados, sem gerar o texto de pré-atendimento.
-            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $knownContactCompanyForGemini, $from, $conversationState);
-            Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
+                case 'bant_b':
+                    $session->qualification_data = array_merge($session->qualification_data, ['bant_budget' => $text]);
+                    $responseMessage = $this->askBantQuestion('A', $session);
+                    $session->current_stage = 'bant_a';
+                    break;
 
-            // Extrai os dados do Gemini. Se o Gemini retornar vazio ou "Não conhecido", tratamos como null.
-            $extractedContactName = ($geminiResponse['contact_name'] ?? '') === '' || ($geminiResponse['contact_name'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_name'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_name'];
-            $extractedContactEmail = ($geminiResponse['contact_email'] ?? '') === '' || ($geminiResponse['contact_email'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_email'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_email'];
-            $extractedContactCompany = ($geminiResponse['contact_company'] ?? '') === '' || ($geminiResponse['contact_company'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_company'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_company'];
-            
-            // --- Determine os dados mais atualizados da pessoa (priorizando extração do Gemini e payload) ---
-            // Estes serão os dados que usaremos para a lógica de estado e para criar/atualizar a Pessoa/Lead
-            $currentPersonName = optional($person)->name;
-            $currentPersonCompany = optional(optional($person)->organization)->name;
-            $currentPersonEmail = (json_decode(optional($person)->emails, true)[0]['value'] ?? null);
+                case 'bant_a':
+                    $session->qualification_data = array_merge($session->qualification_data, ['bant_authority' => $text]);
+                    $responseMessage = $this->askBantQuestion('N', $session);
+                    $session->current_stage = 'bant_n';
+                    break;
 
-            // Prioriza o nome extraído do Gemini, se for válido e mais específico
-            if (!empty($extractedContactName)) {
-                $currentPersonName = $extractedContactName;
-            } 
-            // Se o Gemini não extraiu um nome válido, mas o initialContactName não é um placeholder, usa o initialContactName
-            elseif (empty($currentPersonName) || str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
-                if (!empty($initialContactName) && !str_starts_with($initialContactName, 'Cliente WhatsApp ')) {
-                    $currentPersonName = $initialContactName;
-                } else {
-                    $currentPersonName = null; // Garante que é null se for um placeholder
-                }
-            }
+                case 'bant_n':
+                    $session->qualification_data = array_merge($session->qualification_data, ['bant_need' => $text]);
+                    $responseMessage = $this->askBantQuestion('T', $session);
+                    $session->current_stage = 'bant_t';
+                    break;
 
-            // Prioriza a empresa extraída do Gemini, se for válida e mais específica
-            if (!empty($extractedContactCompany)) {
-                $currentPersonCompany = $extractedContactCompany;
-            }
+                case 'bant_t':
+                    $session->qualification_data = array_merge($session->qualification_data, ['bant_timeline' => $text]);
 
-            // Prioriza o email extraído do Gemini, se for válido e mais específico
-            if (!empty($extractedContactEmail)) {
-                $currentPersonEmail = $extractedContactEmail;
-            }
+                    // All qualification data collected, now process and create lead
+                    $qualificationResult = $this->evaluateQualification($session->qualification_data);
 
-            // --- Lógica para determinar a próxima mensagem e o próximo estado ---
-            $preAttendanceText = '';
-            $nextState = $conversationState;
-            $lead = null; // Inicializa $lead como null, será preenchido se o lead for criado/encontrado
-
-            // Define o texto de pré-atendimento e o próximo estado
-            if ($conversationState === 'initial_greeting') {
-                $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM.";
-                // Verifica se já temos um nome válido para pular a pergunta do nome
-                if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
-                    $nextState = 'awaiting_company';
-                    $preAttendanceText .= " Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
-                } else {
-                    $nextState = 'awaiting_name';
-                    $preAttendanceText .= " Qual é o seu nome completo?";
-                }
-            } elseif ($conversationState === 'awaiting_name') {
-                if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
-                    // Nome foi fornecido, agora perguntar a empresa
-                    $preAttendanceText = "Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
-                    $nextState = 'awaiting_company';
-                } else {
-                    // Ainda aguardando o nome (caso o Gemini não tenha extraído ou a resposta foi genérica)
-                    $preAttendanceText = "Olá! Qual é o seu nome completo?";
-                    $nextState = 'awaiting_name';
-                }
-            } elseif ($conversationState === 'awaiting_company') {
-                if (!empty($currentPersonCompany)) {
-                    // Empresa foi fornecida, finalizar e criar o lead
-                    $preAttendanceText = "Ótimo, " . $currentPersonName . " da " . $currentPersonCompany . "! Um especialista da PipeGrow CRM entrará em contato em breve para entender melhor suas necessidades. Obrigado!";
-                    $nextState = 'completed';
-
-                    // --- CRIAÇÃO/ATUALIZAÇÃO DE PERSON E LEAD AQUI (APENAS SE COMPLETED) ---
-                    if (!$person) {
-                        // Se a pessoa não existe, cria agora com todas as informações
-                        Log::info('Atendimento concluído. Criando nova pessoa.');
-                        $defaultUser = User::first();
-                        $personData = [
-                            'name'            => $currentPersonName,
-                            'contact_numbers' => json_encode([['value' => $from, 'label' => 'mobile']]),
-                            'user_id'         => $defaultUser->id ?? null,
-                            'emails'          => json_encode(!empty($currentPersonEmail) ? [['value' => $currentPersonEmail, 'label' => 'work']] : []),
-                        ];
-                        $person = Person::create($personData);
-                        if (!$defaultUser) {
-                            Log::warning('Nenhum usuário padrão encontrado para atribuir a nova pessoa. A pessoa foi criada sem atribuição de usuário.');
-                        }
+                    if ($qualificationResult['qualified']) {
+                        $lead = $this->createLeadFromQualificationData($from, $session->qualification_data);
+                        $session->lead_id = $lead->id;
+                        $session->current_stage = 'qualified';
+                        $responseMessage = "Excelente! Com base nas suas respostas, criamos um novo lead para você. Seu ID de lead é: {$lead->id}. Em breve um de nossos especialistas entrará em contato para dar continuidade ao atendimento. " . $qualificationResult['summary'];
                     } else {
-                        // Se a pessoa já existe, atualiza com as informações mais recentes
-                        Log::info('Atendimento concluído. Atualizando pessoa existente.');
-                        $updatePersonData = [];
-                        if ($person->name !== $currentPersonName) {
-                            $updatePersonData['name'] = $currentPersonName;
-                        }
-                        if (!empty($currentPersonEmail) && (json_decode($person->emails, true)[0]['value'] ?? null) !== $currentPersonEmail) {
-                            $emails = json_decode($person->emails, true) ?? [];
-                            $emails[] = ['value' => $currentPersonEmail, 'label' => 'work'];
-                            $updatePersonData['emails'] = json_encode($emails);
-                        }
-                        if (!empty($updatePersonData)) {
-                            $person->update($updatePersonData);
-                        }
+                        $session->current_stage = 'unqualified';
+                        $responseMessage = "Agradecemos o seu interesse. No momento, não conseguimos prosseguir com a criação do lead com as informações fornecidas. " . $qualificationResult['summary'] . " Se desejar, podemos tentar novamente ou fornecer mais informações.";
                     }
+                    break;
 
-                    // Associar organização à pessoa (se houver)
-                    if (!empty($currentPersonCompany)) {
-                        $organization = Organization::firstOrCreate(['name' => $currentPersonCompany]);
-                        if (optional($person)->organization_id !== $organization->id) {
-                            optional($person)->update(['organization_id' => $organization->id]);
-                            Log::info('Pessoa associada à organização: ' . $organization->name);
-                        }
-                    }
+                case 'qualified':
+                    $responseMessage = $this->getGeminiPersonalizedResponse($history, "O lead já foi criado. Como posso ajudar com outras dúvidas sobre o seu lead {$session->lead_id}?");
+                    break;
 
-                    // Criar ou atualizar o lead
-                    $lead = Lead::where('person_id', optional($person)->id)
-                                ->whereIn('status', ['open', 'new'])
-                                ->first();
+                case 'unqualified':
+                    $responseMessage = $this->getGeminiPersonalizedResponse($history, "O atendimento foi concluído, mas o lead não foi criado. Como posso ajudar com outras informações ou tentar novamente a qualificação?");
+                    break;
 
-                    if (!$lead) {
-                        Log::info('Criando novo lead para a pessoa: ' . optional($person)->name);
-                        $whatsappSource = Source::firstOrCreate(['name' => 'WhatsApp'], ['code' => 'whatsapp']);
-                        
-                        $leadTitle = 'Lead WhatsApp de ' . optional($person)->name . ($currentPersonCompany ? ' (' . $currentPersonCompany . ')' : '');
-
-                        $lead = Lead::create([
-                            'title'               => $leadTitle,
-                            'lead_pipeline_id'    => 1,
-                            'lead_pipeline_stage_id' => 1,
-                            'lead_source_id'      => $whatsappSource->id ?? null,
-                            'lead_type_id'        => 1,
-                            'user_id'             => optional($person)->user_id,
-                            'person_id'           => optional($person)->id,
-                            'expected_close_date' => now()->addDays(7),
-                            'status'              => 'new',
-                            'lead_value'          => 0,
-                            'description'         => $text,
-                        ]);
-                        Log::info('Novo lead criado:', ['lead_id' => $lead->id]);
-                    } else {
-                        Log::info('Lead existente encontrado, atualizando título se necessário:', ['lead_id' => $lead->id]);
-                        if ($currentPersonCompany && !str_contains($lead->title, $currentPersonCompany)) {
-                            $lead->update(['title' => 'Lead WhatsApp de ' . optional($person)->name . ' (' . $currentPersonCompany . ')']);
-                        }
-                    }
-                } else {
-                    // Ainda aguardando o nome da empresa
-                    $preAttendanceText = "Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
-                    $nextState = 'awaiting_company';
-                }
-            } elseif ($conversationState === 'completed') {
-                // Se o estado já está completo, apenas confirma o recebimento da mensagem
-                $preAttendanceText = "Olá novamente, " . $currentPersonName . "! Já recebemos suas informações. Um especialista entrará em contato em breve para te ajudar.";
-                // Tenta encontrar o lead para logar corretamente
-                $lead = Lead::where('person_id', optional($person)->id)->first();
-            } else {
-                // Fallback para estado desconhecido, volta para a saudação inicial
-                $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM. Qual é o seu nome completo?";
-                $nextState = 'awaiting_name';
+                default:
+                    // Fallback for unexpected states, use Gemini for general response
+                    $responseMessage = $this->getGeminiPersonalizedResponse($history, "Desculpe, não entendi. Poderia reformular ou me dizer como posso ajudar?");
+                    break;
             }
-
-            // Salva o próximo estado da conversa no cache
-            Cache::put($cacheKeyConversationState, $nextState, now()->addMinutes(60));
-
-
-            // --- 4. Adicionar a mensagem original e a resposta do assistente como ATIVIDADES ---
-            $activityData = [
-                'type'          => 'whatsapp_message',
-                'description'   => 'Mensagem original de ' . $from . ': ' . $text,
-                'person_id'     => optional($person)->id, // Usar optional para pessoa pode ser null
-                'user_id'       => optional($person)->user_id, // Usar optional para user_id
-                'is_done'       => 1,
-                'schedule_from' => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
-                'schedule_to'   => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
-            ];
-
-            if ($lead) { // Verifica se $lead foi definido (se o atendimento foi concluído)
-                $activityData['title'] = 'Mensagem WhatsApp Recebida (Lead: ' . $lead->title . ')';
-                $activityData['lead_id'] = $lead->id;
-            } else {
-                $activityData['title'] = 'Mensagem WhatsApp Recebida';
-                // Se o lead ainda não foi criado, remove o lead_id para evitar erro
-                unset($activityData['lead_id']); 
-            }
-            Activity::create($activityData);
-            Log::info('Mensagem original do WhatsApp adicionada como atividade.');
-
-            $activityData['type'] = 'whatsapp_message_auto_response';
-            $activityData['description'] = 'Resposta do assistente: ' . $preAttendanceText;
-            $activityData['schedule_from'] = now();
-            $activityData['schedule_to'] = now();
-
-            if ($lead) { // Verifica se $lead foi definido
-                $activityData['title'] = 'Resposta Automática (Lead: ' . $lead->title . ')';
-                $activityData['lead_id'] = $lead->id;
-            } else {
-                $activityData['title'] = 'Resposta Automática';
-                // Se o lead ainda não foi criado, remove o lead_id para evitar erro
-                unset($activityData['lead_id']);
-            }
-            Activity::create($activityData);
-            Log::info('Resposta do assistente adicionada como atividade.');
-
-            Log::info('Processamento da mensagem do WhatsApp concluído.', [
-                'lead_id' => optional($lead)->id ?? 'N/A (Lead não criado)',
-                'person_id' => optional($person)->id ?? 'N/A (Pessoa não criada)',
-                'from' => $from,
-                'message' => $text,
-                'current_state' => $nextState
-            ]);
-
-            // --- 6. Enviar resposta de volta para o WhatsApp ---
-            $this->sendWhatsappMessage($from, $preAttendanceText);
-
-            // Marca a mensagem de webhook como processada no cache de idempotência
-            if ($messageId) {
-                Cache::put($cacheKeyIdempotency, true, now()->addMinutes(60));
-            }
-
-        } catch (\Exception $e) {
-            Log::error('Erro ao processar mensagem do WhatsApp: ' . $e->getMessage(), [
-                'message_data' => $this->messageData,
-                'exception' => $e
-            ]);
+        } catch (Exception $e) {
+            Log::error("Error processing WhatsApp message for {$from}: " . $e->getMessage());
+            $responseMessage = "Desculpe, ocorreu um erro ao processar sua solicitação. Por favor, tente novamente mais tarde.";
         }
+
+        // Save the updated session state
+        $session->save();
+
+        // Send the response back to the user
+        $this->sendWhatsappMessage($from, $responseMessage);
     }
 
     /**
-     * Formata um número de telefone brasileiro para incluir o '9' adicional, se necessário.
+     * Sends a WhatsApp message to the specified recipient.
+     * This method would typically interact with a WhatsApp API (e.g., Meta's Cloud API, Twilio, etc.).
      *
-     * @param string $phoneNumber O número de telefone a ser formatado.
-     * @return string O número de telefone formatado.
+     * @param string $to The recipient's phone number.
+     * @param string $message The message to send.
+     * @return void
      */
-    protected function formatBrazilianPhoneNumber(string $phoneNumber): string
+    private function sendWhatsappMessage(string $to, string $message): void
     {
-        Log::info('formatBrazilianPhoneNumber: Input received', ['phoneNumber' => $phoneNumber]);
-        // Remove tudo que não for dígito
-        $cleanedNumber = preg_replace('/\D/', '', $phoneNumber);
-        Log::info('formatBrazilianPhoneNumber: Cleaned number', ['cleanedNumber' => $cleanedNumber]);
-
-        // Verifica se é um número brasileiro (começa com 55)
-        if (str_starts_with($cleanedNumber, '55')) {
-            $ddd = substr($cleanedNumber, 2, 2); // Pega o DDD (ex: 62)
-            $localNumber = substr($cleanedNumber, 4); // Pega o restante do número
-            Log::info('formatBrazilianPhoneNumber: Brazilian number detected', ['ddd' => $ddd, 'localNumber' => $localNumber]);
-
-            // Celulares brasileiros têm 9 dígitos após o DDD. Se o número local tem 8, adicionamos o '9'.
-            // Ex: 556281234567 (12 dígitos) -> 5562981234567 (13 dígitos)
-            // Ex: 5562994123173 (13 dígitos) - já está ok
-            if (strlen($localNumber) === 8) {
-                $formattedNumber = '55' . $ddd . '9' . $localNumber;
-                Log::info('formatBrazilianPhoneNumber: Added 9th digit', ['formattedNumber' => $formattedNumber]);
-                return $formattedNumber;
-            }
-        }
-
-        Log::info('formatBrazilianPhoneNumber: No 9th digit added or not Brazilian', ['finalNumber' => $cleanedNumber]);
-        return $cleanedNumber; // Retorna o número limpo se não for brasileiro ou já estiver formatado
-    }
-
-    /**
-     * Faz a chamada à API do Gemini 2.5 para extrair dados com base no estado da conversa.
-     *
-     * @param string $message O texto da mensagem do usuário.
-     * @param string $knownContactName O nome do contato já conhecido (do CRM).
-     * @param string $knownContactEmail O email do contato já conhecido (do CRM).
-     * @param string $knownContactCompany O nome da empresa do contato já conhecido (do CRM).
-     * @param string $from O número de telefone formatado do remetente (para chave de cache).
-     * @param string $conversationState O estado atual da conversa (e.g., 'awaiting_name', 'awaiting_company').
-     * @return array A resposta processada do Gemini.
-     */
-    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, string $knownContactCompany, string $from, string $conversationState): array
-    {
-        $apiKey = env('GEMINI_API_KEY');
-        $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
-
-        // Chave para o histórico de conversa no cache (baseada no número do remetente)
-        $cacheKeyConversation = 'whatsapp_conversation_history_' . $from;
-        // Carrega o histórico de conversa do cache
-        $conversationHistory = Cache::get($cacheKeyConversation, []);
-        Log::info('Histórico de conversa carregado do cache em callGeminiAPI:', ['from' => $from, 'history_length' => count($conversationHistory)]);
-
-        // Adiciona a mensagem atual do usuário ao histórico ANTES de enviar para o Gemini
-        $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
-        Log::info('Mensagem do usuário adicionada ao histórico ANTES da chamada Gemini.', ['from' => $from, 'history_length' => count($conversationHistory)]);
-
-        // Define a instrução do sistema com base no estado atual da conversa
-        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é extrair informações específicas do cliente com base no estado atual da conversa.
-
-        Instruções gerais:
-        - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
-        - Certifique-se de que TODAS as chaves JSON esperadas (contact_name, contact_email, contact_company) estejam presentes.
-        - O valor de 'contact_email' DEVE ser uma string vazia (\" \").
-        - O valor de 'contact_name' DEVE ser o nome completo do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactName' do contexto se não houver um novo nome na última mensagem. Se 'knownContactName' for 'Não conhecido', então use \"\". É CRÍTICO que você sempre retorne o nome mais preciso e atualizado.
-        - O valor de 'contact_company' DEVE ser o nome da empresa do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactCompany' do contexto se não houver um novo nome de empresa na última mensagem. Se 'knownContactCompany' for 'Não conhecido', então use \"\". É CRÍTICO que você sempre retorne o nome da empresa mais preciso e atualizado.
-        - O campo 'pre_attendance_text' DEVE ser uma string vazia (\" \"). O texto da resposta ao cliente será gerado no backend.
-
-        Contexto atual do cliente (informações já conhecidas do CRM):
-        - Nome: '" . ($knownContactName === 'Não conhecido' ? '' : $knownContactName) . "'
-        - Empresa: '" . ($knownContactCompany === 'Não conhecido' ? '' : $knownContactCompany) . "'
-        - Estado da conversa: '{$conversationState}'
-
-        Com base na última mensagem do cliente: \"{$message}\", extraia a informação relevante para o estado '{$conversationState}' e preencha o JSON.
-
-        Lógica de extração baseada no estado:
-        - Se o estado for 'awaiting_name' ou 'initial_greeting': Tente extrair o nome completo do cliente da última mensagem.
-        - Se o estado for 'awaiting_company': Tente extrair o nome da empresa da última mensagem.
-        - Se o estado for 'completed' ou outro: Apenas extraia qualquer nome ou empresa que possa ser fornecido, mesmo que o estado já seja 'completed'.
-
-        A estrutura JSON COMPLETA esperada é:
-        {
-            \"pre_attendance_text\": \"\",
-            \"contact_name\": \"<nome do contato extraído ou o nome conhecido, ou \"\">\",
-            \"contact_email\": \"\",
-            \"contact_company\": \"<nome da empresa extraído ou o nome da empresa conhecida, ou \"\">\"
-        }
-        ";
-
-        // Constrói o array 'contents' para o API do Gemini
-        // Adiciona a instrução do sistema como o primeiro turno 'user' se o histórico estiver vazio ou se a instrução mudou
-        if (empty($conversationHistory) || !isset($conversationHistory[0]['parts'][0]['text']) || $conversationHistory[0]['parts'][0]['text'] !== $systemInstructionText) {
-            array_unshift($conversationHistory, ['role' => 'user', 'parts' => [['text' => $systemInstructionText]]]);
-        }
-        
-        // Usa o histórico de conversa (que agora inclui a mensagem do usuário) para construir o payload para o Gemini
-        $contents = $conversationHistory;
-
+        // IMPORTANT: Replace this with your actual WhatsApp API integration logic.
+        // This is a placeholder. You'll need to configure your WhatsApp Business API
+        // or a third-party provider (like Twilio, Vonage, etc.) here.
+        // Example using a hypothetical WhatsApp API endpoint:
+        /*
         try {
-            $response = Http::timeout(60)->post($apiUrl, [
-                'contents' => $contents,
-                'generationConfig' => [
-                    'responseMimeType' => "application/json",
-                    "responseSchema" => [
-                        "type" => "OBJECT",
-                        "properties" => [
-                            "pre_attendance_text" => ["type" => "STRING"],
-                            "contact_name" => ["type" => "STRING"],
-                            "contact_email" => ["type" => "STRING"],
-                            "contact_company" => ["type" => "STRING"],
-                        ],
-                        "propertyOrdering" => [
-                            "pre_attendance_text", "contact_name", "contact_email", "contact_company"
-                        ],
-                    ],
-                ],
+            Http::post('YOUR_WHATSAPP_API_ENDPOINT', [
+                'to'      => $to,
+                'message' => $message,
+                'token'   => 'YOUR_WHATSAPP_API_TOKEN',
             ]);
-
-            if ($response->successful()) {
-                $result = $response->json();
-                if (isset($result['candidates'][0]['content']['parts'][0]['text'])) {
-                    $jsonString = $result['candidates'][0]['content']['parts'][0]['text'];
-                    $jsonString = preg_replace('/[[:cntrl:]]/', '', $jsonString);
-                    $jsonString = trim($jsonString);
-
-                    $jsonStart = strpos($jsonString, '{');
-                    $jsonEnd = strrpos($jsonString, '}');
-
-                    if ($jsonStart !== false && $jsonEnd !== false) {
-                        $jsonString = substr($jsonString, $jsonStart, $jsonEnd - $jsonStart + 1);
-                    } else {
-                        Log::warning('Não foi possível encontrar um objeto JSON completo na resposta do Gemini.', ['raw_gemini_response_text' => $jsonString]);
-                        // Se o JSON for inválido, ainda salvamos o histórico com a mensagem do usuário
-                        Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
-                        return $this->getDefaultGeminiResponse();
-                    }
-
-                    $parsedJson = json_decode($jsonString, true);
-                    if (json_last_error() === JSON_ERROR_NONE) {
-                        // Adiciona a resposta do modelo ao histórico
-                        // O pre_attendance_text do Gemini agora será vazio, mas ainda o adicionamos para manter a estrutura.
-                        $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $parsedJson['pre_attendance_text']]]];
-                        Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
-                        Log::info('Histórico da conversa atualizado no cache em callGeminiAPI.', ['from' => $from, 'history_length' => count($conversationHistory)]);
-
-                        return $parsedJson;
-                    } else {
-                        Log::error('Erro ao decodificar JSON da resposta do Gemini: ' . json_last_error_msg(), ['json_string_after_cleaning' => $jsonString]);
-                        // Se o JSON for inválido, ainda salvamos o histórico com o histórico atual
-                        Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
-                        return $this->getDefaultGeminiResponse();
-                    }
-                }
-            } else {
-                Log::error('Falha na chamada à API do Gemini:', [
-                    'status' => $response->status(),
-                    'response' => $response->body()
-                ]);
-                // Se a chamada à API falhar, ainda salvamos o histórico com o histórico atual
-                Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
-            }
-        } catch (\Exception $e) {
-            Log::error('Exceção ao chamar a API do Gemini: ' . $e->getMessage());
-            // Se ocorrer uma exceção, ainda salvamos o histórico com o histórico atual
-            Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
+            Log::info("WhatsApp message sent to {$to}: {$message}");
+        } catch (Exception $e) {
+            Log::error("Failed to send WhatsApp message to {$to}: " . $e->getMessage());
         }
+        */
 
-        return $this->getDefaultGeminiResponse();
+        // For demonstration, we'll just log it. In a real application, this sends the message.
+        Log::info("Simulated WhatsApp message sent to {$to}: {$message}");
     }
 
     /**
-     * Retorna uma resposta padrão do Gemini em caso de falha.
+     * Asks a specific SPIN question based on the current stage.
      *
-     * @return array
+     * @param string $type 'S', 'P', 'I', or 'N' for Situation, Problem, Implication, Need-payoff.
+     * @param WhatsappSession $session The current WhatsApp session.
+     * @return string The question to ask.
      */
-    protected function getDefaultGeminiResponse(): array
+    private function askSpinQuestion(string $type, WhatsappSession $session): string
     {
+        $qualificationData = $session->qualification_data ?? [];
+        $prompt = '';
+
+        switch ($type) {
+            case 'S':
+                $prompt = "Olá! Para começarmos, poderia me descrever a *Situação* atual da sua empresa ou do seu desafio? O que você está fazendo atualmente?";
+                break;
+            case 'P':
+                $prompt = "Entendi a situação. Agora, qual é o *Problema* ou a dificuldade que você está enfrentando com a situação atual?";
+                break;
+            case 'I':
+                $prompt = "Compreendo o problema. Quais são as *Implicações* desse problema para o seu negócio? Como ele afeta seus resultados ou operações?";
+                break;
+            case 'N':
+                $prompt = "Certo. Agora, qual é a sua *Necessidade de Solução*? Como a resolução desse problema impactaria positivamente o seu trabalho ou empresa?";
+                break;
+        }
+
+        // Use Gemini to make the question more personalized based on previous context
+        if (! empty($session->conversation_history)) {
+            $chatHistory = $session->conversation_history;
+            $chatHistory[] = ['role' => 'user', 'parts' => [['text' => "Com base na nossa conversa até agora, formule a seguinte pergunta de qualificação SPIN de forma mais personalizada e engajadora, mantendo o foco na etapa '{$type}': \"{$prompt}\""]]];
+            return $this->getGeminiPersonalizedResponse($chatHistory, $prompt);
+        }
+
+        return $prompt;
+    }
+
+    /**
+     * Asks a specific BANT question based on the current stage.
+     *
+     * @param string $type 'B', 'A', 'N', or 'T' for Budget, Authority, Need, Timeline.
+     * @param WhatsappSession $session The current WhatsApp session.
+     * @return string The question to ask.
+     */
+    private function askBantQuestion(string $type, WhatsappSession $session): string
+    {
+        $qualificationData = $session->qualification_data ?? [];
+        $prompt = '';
+
+        switch ($type) {
+            case 'B':
+                $prompt = "Agora, vamos falar sobre o *Orçamento (Budget)*. Você tem um orçamento definido ou uma ideia de investimento para essa solução?";
+                break;
+            case 'A':
+                $prompt = "Perfeito. Quem tem a *Autoridade* para tomar a decisão final sobre a aquisição dessa solução?";
+                break;
+            case 'N':
+                $prompt = "Entendido. Qual é a *Necessidade* específica que você espera que nossa solução atenda? Qual o principal objetivo?";
+                break;
+            case 'T':
+                $prompt = "Por fim, qual é o *Prazo (Timeline)* esperado para implementar essa solução? Você tem uma data em mente?";
+                break;
+        }
+
+        // Use Gemini to make the question more personalized based on previous context
+        if (! empty($session->conversation_history)) {
+            $chatHistory = $session->conversation_history;
+            $chatHistory[] = ['role' => 'user', 'parts' => [['text' => "Com base na nossa conversa até agora, formule a seguinte pergunta de qualificação BANT de forma mais personalizada e engajadora, mantendo o foco na etapa '{$type}': \"{$prompt}\""]]];
+            return $this->getGeminiPersonalizedResponse($chatHistory, $prompt);
+        }
+
+        return $prompt;
+    }
+
+    /**
+     * Evaluates the collected qualification data to determine if a lead is qualified.
+     * This is a simplified example; real-world logic would be more complex.
+     *
+     * @param array $data The collected qualification data.
+     * @return array Contains 'qualified' (boolean) and 'summary' (string).
+     */
+    private function evaluateQualification(array $data): array
+    {
+        $qualified = true;
+        $summary = "Resumo da qualificação:\n";
+
+        // Basic qualification logic (can be expanded)
+        if (empty($data['spin_situation'])) {
+            $qualified = false;
+            $summary .= "- Situação: Não fornecida.\n";
+        } else {
+            $summary .= "- Situação: " . $data['spin_situation'] . "\n";
+        }
+
+        if (empty($data['spin_problem'])) {
+            $qualified = false;
+            $summary .= "- Problema: Não fornecido.\n";
+        } else {
+            $summary .= "- Problema: " . $data['spin_problem'] . "\n";
+        }
+
+        if (empty($data['bant_budget']) || strtolower($data['bant_budget']) === 'não tenho') {
+            // A more sophisticated check would involve parsing budget amounts
+            $qualified = false;
+            $summary .= "- Orçamento: Não definido ou insuficiente.\n";
+        } else {
+            $summary .= "- Orçamento: " . $data['bant_budget'] . "\n";
+        }
+
+        if (empty($data['bant_authority']) || strtolower($data['bant_authority']) === 'não sei') {
+            $qualified = false;
+            $summary .= "- Autoridade: Não identificada.\n";
+        } else {
+            $summary .= "- Autoridade: " . $data['bant_authority'] . "\n";
+        }
+
+        if (empty($data['bant_need'])) {
+            $qualified = false;
+            $summary .= "- Necessidade (BANT): Não clara.\n";
+        } else {
+            $summary .= "- Necessidade (BANT): " . $data['bant_need'] . "\n";
+        }
+
+        if (empty($data['bant_timeline'])) {
+            $qualified = false;
+            $summary .= "- Prazo: Não definido.\n";
+        } else {
+            $summary .= "- Prazo: " . $data['bant_timeline'] . "\n";
+        }
+
+        // Add more complex logic here based on your specific qualification criteria
+        // For example, keywords in responses, specific budget ranges, etc.
+
         return [
-            'pre_attendance_text' => '', // Agora vazio, pois o backend gerencia a saudação
-            'contact_name'        => 'Não conhecido',
-            'contact_email'       => '',
-            'contact_company'     => '',
+            'qualified' => $qualified,
+            'summary'   => $summary,
         ];
     }
 
     /**
-     * Envia uma mensagem de volta para o WhatsApp.
+     * Creates a new lead in the database from the qualified data.
      *
-     * @param string $to O número de telefone do destinatário.
-     * @param string $message O texto da mensagem a ser enviada.
-     * @return void
+     * @param string $phoneNumber The phone number of the lead.
+     * @param array $qualificationData The collected qualification data.
+     * @return Lead The newly created Lead model instance.
      */
-    protected function sendWhatsappMessage(string $to, string $message): void
+    private function createLeadFromQualificationData(string $phoneNumber, array $qualificationData): Lead
     {
-        $accessToken = env('WHATSAPP_ACCESS_TOKEN');
-        $phoneNumberId = env('WHATSAPP_PHONE_NUMBER_ID');
+        // Extract relevant data for lead creation
+        $name = $qualificationData['spin_situation'] ?? 'Lead WhatsApp'; // Use situation as a basic name
+        $email = $qualificationData['email'] ?? "{$phoneNumber}@whatsapp.com"; // Assuming email might be collected or default
+        $source = $qualificationData['source'] ?? 'WhatsApp'; // Assuming source might be collected or default
 
-        Log::info('Tentando enviar mensagem WhatsApp com:', [
-            'to' => $to,
-            'phoneNumberId' => $phoneNumberId,
-            'accessToken_present' => !empty($accessToken)
+        // You'll need to map your qualification data to your Lead model's fillable fields.
+        // This is a placeholder and should be adjusted to your actual Lead model structure.
+        $lead = Lead::create([
+            'title'              => 'Novo Lead Qualificado via WhatsApp',
+            'description'        => $this->formatQualificationDataForDescription($qualificationData),
+            'lead_pipeline_id'   => 1, // Replace with actual pipeline ID
+            'lead_pipeline_stage_id' => 1, // Replace with actual initial stage ID
+            'user_id'            => 1, // Assign to a default user or implement user assignment logic
+            'person_id'          => null, // Create or link a person if needed
+            'organization_id'    => null, // Create or link an organization if needed
+            'lead_source_id'     => $this->getLeadSourceId($source), // Helper to get source ID
+            'lead_type_id'       => $this->getLeadTypeId('default'), // Helper to get type ID
+            'expected_close_date' => now()->addDays(30), // Example: 30 days from now
+            'lead_value'         => 0, // Initial value, can be updated later
+            'status'             => 'open',
+            'created_at'         => now(),
+            'updated_at'         => now(),
+            // Add any other required fields for your Lead model
         ]);
 
-        if (!$accessToken || !$phoneNumberId) {
-            Log::error('Erro: WHATSAPP_ACCESS_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurados no .env. Não foi possível enviar a mensagem de resposta.');
-            return;
+        Log::info("Lead created successfully for {$phoneNumber} with ID: {$lead->id}");
+
+        return $lead;
+    }
+
+    /**
+     * Formats the qualification data into a readable description for the lead.
+     *
+     * @param array $data The collected qualification data.
+     * @return string
+     */
+    private function formatQualificationDataForDescription(array $data): string
+    {
+        $description = "Dados de Qualificação (SPIN/BANT) via WhatsApp:\n\n";
+        foreach ($data as $key => $value) {
+            $description .= ucfirst(str_replace('_', ' ', $key)) . ": " . $value . "\n";
         }
+        return $description;
+    }
 
-        $url = "https://graph.facebook.com/v19.0/{$phoneNumberId}/messages";
+    /**
+     * Helper to get Lead Source ID. Replace with your actual logic.
+     *
+     * @param string $sourceName
+     * @return int
+     */
+    private function getLeadSourceId(string $sourceName): int
+    {
+        // Example: Fetch from database or use a default
+        // return \Webkul\Lead\Models\Source::where('name', $sourceName)->first()->id ?? 1;
+        return 1; // Placeholder: Assume ID 1 for 'WhatsApp' source
+    }
 
+    /**
+     * Helper to get Lead Type ID. Replace with your actual logic.
+     *
+     * @param string $typeName
+     * @return int
+     */
+    private function getLeadTypeId(string $typeName): int
+    {
+        // Example: Fetch from database or use a default
+        // return \Webkul\Lead\Models\Type::where('name', $typeName)->first()->id ?? 1;
+        return 1; // Placeholder: Assume ID 1 for 'Default' type
+    }
+
+    /**
+     * Interacts with the Gemini API to get a personalized response.
+     *
+     * @param array $chatHistory The conversation history to send to Gemini.
+     * @param string $fallbackMessage A message to return if Gemini API fails.
+     * @return string The personalized response from Gemini or the fallback message.
+     */
+    private function getGeminiPersonalizedResponse(array $chatHistory, string $fallbackMessage): string
+    {
         try {
-            $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . $accessToken,
-                'Content-Type'  => 'application/json',
-            ])->post($url, [
-                'messaging_product' => 'whatsapp',
-                'to'                => $to,
-                'type'              => 'text',
-                'text'              => ['body' => $message],
-            ]);
+            $apiKey = ""; // Leave this as-is. Canvas will automatically provide it.
+            $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
-            if ($response->successful()) {
-                Log::info('Mensagem do WhatsApp enviada com sucesso para ' . $to, ['response' => $response->json()]);
+            // Ensure the chat history format matches Gemini's expected 'contents' structure
+            $payload = [
+                'contents' => $chatHistory,
+                'generationConfig' => [
+                    'temperature' => 0.7, // Adjust creativity as needed
+                    'topP'        => 0.95,
+                    'topK'        => 40,
+                ],
+            ];
+
+            $response = Http::withHeaders([
+                'Content-Type' => 'application/json',
+            ])->post($apiUrl, $payload);
+
+            $result = $response->json();
+
+            if ($response->successful() && isset($result['candidates'][0]['content']['parts'][0]['text'])) {
+                return $result['candidates'][0]['content']['parts'][0]['text'];
             } else {
-                Log::error('Falha ao enviar mensagem do WhatsApp para ' . $to, [
-                    'status' => $response->status(),
-                    'response' => $response->body()
-                ]);
+                Log::warning("Gemini API call failed or returned unexpected structure: " . json_encode($result));
+                return $fallbackMessage;
             }
-        } catch (\Exception $e) {
-            Log::error('Exceção ao enviar mensagem do WhatsApp: ' . $e->getMessage(), ['to' => $to]);
+        } catch (Exception $e) {
+            Log::error("Error calling Gemini API: " . $e->getMessage());
+            return $fallbackMessage;
         }
     }
 }
