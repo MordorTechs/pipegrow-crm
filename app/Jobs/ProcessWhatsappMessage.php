@@ -104,9 +104,12 @@ class ProcessWhatsappMessage implements ShouldQueue
             }
 
             // --- 1. Chamada ao Gemini 2.5 para extração de dados com base no estado atual ---
+            // O Gemini agora focará apenas na extração de dados, sem gerar o texto de pré-atendimento.
             $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $knownContactCompanyForGemini, $from, $conversationState);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
+            // Os valores de contactName, contactEmail e contactCompany virão do Gemini.
+            // Se o Gemini não preencher, eles serão null e serão tratados abaixo.
             $contactName = $geminiResponse['contact_name'] ?? null;
             $contactEmail = $geminiResponse['contact_email'] ?? null;
             $contactCompany = $geminiResponse['contact_company'] ?? null;
@@ -133,13 +136,16 @@ class ProcessWhatsappMessage implements ShouldQueue
                 }
             } else {
                 // Atualiza o nome da pessoa se o Gemini forneceu um nome mais específico E se o nome atual não é um placeholder
-                if (!empty($contactName) && $contactName !== $person->name && !str_starts_with($person->name, 'Cliente WhatsApp ')) {
-                    $person->update(['name' => $contactName]);
-                    Log::info('Nome da pessoa atualizado pelo Gemini: ' . $contactName);
-                } elseif (str_starts_with($person->name, 'Cliente WhatsApp ') && !empty($contactName)) {
-                     // Se o nome atual é um placeholder e o Gemini forneceu um nome, atualiza
-                    $person->update(['name' => $contactName]);
-                    Log::info('Nome placeholder da pessoa atualizado pelo Gemini: ' . $contactName);
+                // Prioriza o nome extraído pelo Gemini
+                if (!empty($contactName) && $contactName !== $person->name) {
+                    // Evita atualizar para um nome genérico se já tiver um nome real
+                    if (!str_starts_with($person->name, 'Cliente WhatsApp ') || str_starts_with($contactName, 'Cliente WhatsApp ')) {
+                         $person->update(['name' => $contactName]);
+                         Log::info('Nome da pessoa atualizado pelo Gemini: ' . $contactName);
+                    } elseif (str_starts_with($person->name, 'Cliente WhatsApp ') && !empty($contactName)) {
+                        $person->update(['name' => $contactName]);
+                        Log::info('Nome placeholder da pessoa atualizado pelo Gemini: ' . $contactName);
+                    }
                 }
 
                 // Tenta atualizar o email se o Gemini forneceu um email e ele ainda não existe
@@ -156,7 +162,8 @@ class ProcessWhatsappMessage implements ShouldQueue
             // Lidar com a organização (empresa)
             if (!empty($contactCompany)) {
                 $organization = Organization::firstOrCreate(['name' => $contactCompany]);
-                if ($person->organization_id !== $organization->id) {
+                // Apenas associa se a organização for diferente da atual ou se não houver organização
+                if (empty($person->organization_id) || $person->organization_id !== $organization->id) {
                     $person->update(['organization_id' => $organization->id]);
                     Log::info('Pessoa associada à organização: ' . $organization->name);
                 }
@@ -208,23 +215,45 @@ class ProcessWhatsappMessage implements ShouldQueue
             $personOrganizationName = optional($person->organization)->name;
 
             // Lógica de estado aprimorada
-            if (empty($person->name) || str_starts_with($person->name, 'Cliente WhatsApp ')) {
+            // Prioriza o nome extraído pelo Gemini na resposta, se não for vazio.
+            $currentPersonName = !empty($contactName) ? $contactName : $person->name;
+            $currentPersonCompany = !empty($contactCompany) ? $contactCompany : $personOrganizationName;
+
+            // Define o texto de pré-atendimento e o próximo estado
+            if ($conversationState === 'awaiting_name') {
+                if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
+                    // Nome foi fornecido, agora perguntar a empresa
+                    $preAttendanceText = "Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
+                    $nextState = 'awaiting_company';
+                } else {
+                    // Ainda aguardando o nome
+                    $preAttendanceText = "Olá! Qual é o seu nome completo?";
+                    $nextState = 'awaiting_name';
+                }
+            } elseif ($conversationState === 'awaiting_company') {
+                if (!empty($currentPersonCompany)) {
+                    // Empresa foi fornecida, finalizar
+                    $preAttendanceText = "Ótimo, " . $currentPersonName . " da " . $currentPersonCompany . "! Um especialista da PipeGrow CRM entrará em contato em breve para entender melhor suas necessidades. Obrigado!";
+                    $nextState = 'completed';
+                } else {
+                    // Ainda aguardando o nome da empresa
+                    $preAttendanceText = "Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
+                    $nextState = 'awaiting_company';
+                }
+            } elseif ($conversationState === 'completed') {
+                // Se o estado já está completo, apenas confirma o recebimento da mensagem
+                $preAttendanceText = "Olá novamente, " . $currentPersonName . "! Já recebemos suas informações. Um especialista entrará em contato em breve para te ajudar.";
+            } else {
+                // Estado desconhecido ou inicial, volta para pedir o nome
                 $preAttendanceText = "Olá! Qual é o seu nome completo?";
                 $nextState = 'awaiting_name';
-            } elseif (empty($person->organization_id) || empty($personOrganizationName)) {
-                $preAttendanceText = "Olá, " . $person->name . "! Qual o nome da empresa que você representa?";
-                $nextState = 'awaiting_company';
-            } else {
-                // Se nome e empresa são conhecidos, a qualificação está completa para este fluxo simplificado
-                $preAttendanceText = "Ótimo, " . $person->name . " da " . $person->organization->name . "! Um especialista da PipeGrow CRM entrará em contato em breve para entender melhor suas necessidades. Obrigado!";
-                $nextState = 'completed';
             }
 
             // Salva o próximo estado da conversa no cache
             Cache::put($cacheKeyConversationState, $nextState, now()->addMinutes(60));
 
 
-            // --- 4. Adicionar a mensagem original e a resposta do Gemini como ATIVIDADES ---
+            // --- 4. Adicionar a mensagem original e a resposta do assistente como ATIVIDADES ---
             $activityData = [
                 'type'          => 'whatsapp_message',
                 'description'   => 'Mensagem original de ' . $from . ': ' . $text,
@@ -345,11 +374,11 @@ class ProcessWhatsappMessage implements ShouldQueue
 
         Instruções gerais:
         - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
-        - Certifique-se de que TODAS as chaves JSON esperadas (pre_attendance_text, contact_name, contact_email, contact_company) estejam presentes.
+        - Certifique-se de que TODAS as chaves JSON esperadas (contact_name, contact_email, contact_company) estejam presentes.
         - O valor de 'contact_email' DEVE ser uma string vazia (\" \").
         - O valor de 'contact_name' DEVE ser o nome completo do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactName' do contexto se não houver um novo nome na última mensagem. Se 'knownContactName' for 'Não conhecido', então use \"\".
         - O valor de 'contact_company' DEVE ser o nome da empresa do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactCompany' do contexto se não houver um novo nome de empresa na última mensagem. Se 'knownContactCompany' for 'Não conhecido', então use \"\".
-        - O 'pre_attendance_text' DEVE ser uma confirmação da informação extraída ou uma saudação, NUNCA uma pergunta. A pergunta será gerada no backend.
+        - O campo 'pre_attendance_text' DEVE ser uma string vazia (\" \"). O texto da resposta ao cliente será gerado no backend.
 
         Contexto atual do cliente (informações já conhecidas do CRM):
         - Nome: '" . ($knownContactName === 'Não conhecido' ? '' : $knownContactName) . "'
@@ -361,11 +390,11 @@ class ProcessWhatsappMessage implements ShouldQueue
         Lógica de extração baseada no estado:
         - Se o estado for 'awaiting_name': Tente extrair o nome completo do cliente da última mensagem.
         - Se o estado for 'awaiting_company': Tente extrair o nome da empresa da última mensagem.
-        - Se o estado for 'completed' ou outro: Apenas confirme o recebimento da mensagem.
+        - Se o estado for 'completed' ou outro: Apenas extraia qualquer nome ou empresa que possa ser fornecido, mesmo que o estado já seja 'completed'.
 
         A estrutura JSON COMPLETA esperada é:
         {
-            \"pre_attendance_text\": \"<texto de confirmação ou saudação>\",
+            \"pre_attendance_text\": \"\",
             \"contact_name\": \"<nome do contato extraído ou o nome conhecido, ou \"\">\",
             \"contact_email\": \"\",
             \"contact_company\": \"<nome da empresa extraído ou o nome da empresa conhecida, ou \"\">\"
@@ -423,6 +452,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                     $parsedJson = json_decode($jsonString, true);
                     if (json_last_error() === JSON_ERROR_NONE) {
                         // Adiciona a resposta do modelo ao histórico
+                        // O pre_attendance_text do Gemini agora será vazio, mas ainda o adicionamos para manter a estrutura.
                         $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $parsedJson['pre_attendance_text']]]];
                         Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60));
                         Log::info('Histórico da conversa atualizado no cache em callGeminiAPI.', ['from' => $from, 'history_length' => count($conversationHistory)]);
@@ -460,7 +490,7 @@ class ProcessWhatsappMessage implements ShouldQueue
     protected function getDefaultGeminiResponse(): array
     {
         return [
-            'pre_attendance_text' => "Olá! Recebemos sua mensagem. Houve um pequeno problema na minha resposta, mas não se preocupe, um membro da nossa equipe entrará em contato em breve para te ajudar!",
+            'pre_attendance_text' => '', // Agora vazio, pois o backend gerencia a saudação
             'contact_name'        => 'Não conhecido',
             'contact_email'       => '',
             'contact_company'     => '',
