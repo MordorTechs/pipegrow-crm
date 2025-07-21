@@ -9,7 +9,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http; // Para fazer requisições HTTP (para Gemini e WhatsApp)
-use Illuminate\Support\Facades\Cache; // Para idempotência
+use Illuminate\Support\Facades\Cache; // Para usar o sistema de cache do Laravel
 
 // Importe os modelos necessários para interagir com o CRM
 use Webkul\Contact\Models\Person;
@@ -47,9 +47,9 @@ class ProcessWhatsappMessage implements ShouldQueue
     {
         // Chave de idempotência para evitar processamento duplicado
         $messageId = $this->messageData['id'] ?? null;
-        $cacheKey = 'whatsapp_message_processed_' . $messageId;
+        $cacheKeyIdempotency = 'whatsapp_message_processed_' . $messageId;
 
-        if ($messageId && Cache::has($cacheKey)) {
+        if ($messageId && Cache::has($cacheKeyIdempotency)) {
             Log::info('Mensagem do WhatsApp já processada (idempotência): ' . $messageId);
             return;
         }
@@ -79,6 +79,12 @@ class ProcessWhatsappMessage implements ShouldQueue
             $knownContactNameForGemini = 'A ser qualificado';
             $knownContactEmailForGemini = 'A ser qualificado';
 
+            // Chave para o histórico de conversa no cache (baseada no número do remetente)
+            $cacheKeyConversation = 'whatsapp_conversation_history_' . $from;
+            // Carrega o histórico de conversa do cache
+            $conversationHistory = Cache::get($cacheKeyConversation, []);
+            Log::info('Histórico de conversa carregado do cache:', ['from' => $from, 'history_length' => count($conversationHistory)]);
+
             if ($person) {
                 $knownContactNameForGemini = $person->name;
                 $emails = json_decode($person->emails, true) ?? [];
@@ -91,8 +97,8 @@ class ProcessWhatsappMessage implements ShouldQueue
             }
 
             // --- 1. Pré-atendimento com Gemini 2.5 ---
-            // Passamos o nome e email conhecidos para o Gemini para que ele possa considerar no fluxo
-            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini);
+            // Passamos o nome, email conhecidos e o histórico de conversa para o Gemini
+            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $conversationHistory);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
             // Usar o nome do Gemini se for específico, caso contrário, usar o inicial ou o padrão
@@ -120,7 +126,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 $defaultUser = User::first(); 
 
                 $personData = [
-                    'name'            => $contactName, // Usar o nome extraído ou do Gemini
+                    'name'            => $contactName, 
                     'contact_numbers' => json_encode([['value' => $from, 'label' => 'mobile']]),
                     'user_id'         => $defaultUser->id ?? null,
                 ];
@@ -312,9 +318,18 @@ class ProcessWhatsappMessage implements ShouldQueue
             // --- 6. Enviar resposta de volta para o WhatsApp ---
             $this->sendWhatsappMessage($from, $preAttendanceText);
 
-            // Marca a mensagem como processada no cache
+            // --- 7. Salvar o histórico da conversa no cache ---
+            // Adiciona a mensagem do usuário e a resposta do modelo ao histórico
+            $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $text]]];
+            $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $preAttendanceText]]];
+            
+            // Define um tempo de vida para o cache (ex: 60 minutos)
+            Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60)); 
+            Log::info('Histórico da conversa atualizado no cache.', ['from' => $from, 'history_length' => count($conversationHistory)]);
+
+            // Marca a mensagem de webhook como processada no cache de idempotência
             if ($messageId) {
-                Cache::put($cacheKey, true, now()->addMinutes(60)); // Armazena por 60 minutos
+                Cache::put($cacheKeyIdempotency, true, now()->addMinutes(60)); // Armazena por 60 minutos
             }
 
         } catch (\Exception $e) {
@@ -364,33 +379,39 @@ class ProcessWhatsappMessage implements ShouldQueue
      * @param string $message O texto da mensagem do usuário.
      * @param string $knownContactName O nome do contato já conhecido (do CRM).
      * @param string $knownContactEmail O email do contato já conhecido (do CRM).
+     * @param array $conversationHistory O histórico da conversa com o Gemini.
      * @return array A resposta processada do Gemini.
      */
-    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail): array
+    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, array $conversationHistory): array
     {
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
         // Define o contexto atual para o Gemini
-        $contextualPrompt = "O nome do cliente é '{$knownContactName}'.";
-        if ($knownContactName === 'A ser qualificado' || str_starts_with($knownContactName, 'Cliente WhatsApp')) {
-            $contextualPrompt = "O nome do cliente NÃO é conhecido.";
+        $contextualPrompt = "Contexto atual: ";
+        $nameKnown = !($knownContactName === 'A ser qualificado' || str_starts_with($knownContactName, 'Cliente WhatsApp'));
+        $emailKnown = !($knownContactEmail === 'A ser qualificado' || $knownContactEmail === 'Não mencionado');
+
+        if ($nameKnown) {
+            $contextualPrompt .= "O nome do cliente JÁ é conhecido e é '{$knownContactName}'. ";
+        } else {
+            $contextualPrompt .= "O nome do cliente AINDA NÃO é conhecido. ";
         }
 
-        $emailContext = "O e-mail do cliente é '{$knownContactEmail}'.";
-        if ($knownContactEmail === 'A ser qualificado' || $knownContactEmail === 'Não mencionado') {
-            $emailContext = "O e-mail do cliente NÃO é conhecido.";
+        if ($emailKnown) {
+            $contextualPrompt .= "O e-mail do cliente JÁ é conhecido e é '{$knownContactEmail}'.";
+        } else {
+            $contextualPrompt .= "O e-mail do cliente AINDA NÃO é conhecido.";
         }
 
         // Prompt aprimorado para guiar o fluxo da conversa: Nome > SPIN/BANT > Email
-        $prompt = "Você é um assistente de pré-atendimento de vendas. Seu objetivo é qualificar leads pelo WhatsApp, seguindo a seguinte ordem de prioridade para coletar informações:
+        // Este prompt é a instrução "primária" para o modelo, enviada no primeiro turno do histórico.
+        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas. Seu objetivo é qualificar leads pelo WhatsApp, seguindo a seguinte ordem de prioridade para coletar informações:
         1.  **Nome completo do cliente**: Peça o nome se ainda não o tiver.
         2.  **Qualificação SPIN/BANT**: Faça perguntas baseadas em SPIN (Situação, Problema, Implicação, Necessidade de Solução) e BANT (Budget, Authority, Need, Timeline) para entender as necessidades do cliente.
         3.  **Endereço de e-mail do cliente**: Peça o e-mail por último, após alguma qualificação inicial.
 
-        {$contextualPrompt} {$emailContext}
-
-        Analise a seguinte mensagem do cliente: \"{$message}\".
+        {$contextualPrompt}
 
         Com base na análise da mensagem e do contexto atual, crie um texto de pré-atendimento amigável e profissional para o cliente ('pre_attendance_text'), seguindo ESTA lógica de prioridade estrita para a PRÓXIMA pergunta:
         - SE o nome do cliente NÃO é conhecido:
@@ -406,15 +427,28 @@ class ProcessWhatsappMessage implements ShouldQueue
         - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar, use o valor do CONTEXTO ATUAL ('{$knownContactEmail}').
         - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
         - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
-
         ";
 
-        // O array 'contents' agora conterá apenas a instrução do sistema e a mensagem atual do usuário.
-        // O histórico de conversa não é mais mantido no banco de dados para cada turno.
-        $contents = [
-            ['role' => 'user', 'parts' => [['text' => $prompt]]], // O prompt completo é a instrução inicial
-            ['role' => 'user', 'parts' => [['text' => "Mensagem do cliente: \"{$message}\""]]],
-        ];
+        // Constrói o array 'contents' para a API do Gemini
+        $contents = [];
+
+        // Adiciona a instrução do sistema como o primeiro turno 'user' se o histórico estiver vazio
+        // ou se o histórico não começar com a instrução do sistema (para garantir que ela esteja sempre lá)
+        if (empty($conversationHistory) || ($conversationHistory[0]['role'] !== 'user' || $conversationHistory[0]['parts'][0]['text'] !== $systemInstructionText)) {
+            $contents[] = ['role' => 'user', 'parts' => [['text' => $systemInstructionText]]];
+        }
+        
+        // Adiciona os turnos existentes do histórico (se houver e se já não adicionamos a instrução)
+        foreach ($conversationHistory as $turn) {
+            // Evita adicionar a instrução do sistema novamente se ela já foi adicionada no início
+            if ($turn['role'] === 'user' && $turn['parts'][0]['text'] === $systemInstructionText && !empty($contents)) {
+                continue;
+            }
+            $contents[] = $turn;
+        }
+
+        // Adiciona a mensagem atual do usuário como o último turno 'user'
+        $contents[] = ['role' => 'user', 'parts' => [['text' => "Mensagem do cliente: \"{$message}\""]]];
 
         try {
             $response = Http::timeout(60)->post($apiUrl, [ // Aumentado o tempo limite para 60 segundos
