@@ -116,23 +116,9 @@ class ProcessWhatsappMessage implements ShouldQueue
             }
 
             $contactCompany = $geminiResponse['contact_company'] ?? null; // Recupera o nome da empresa
-            if ($contactCompany === 'Não conhecido' || $contactCompany === 'Não mencionado') {
+            if (empty($contactCompany) || $contactCompany === 'Não conhecido' || $contactCompany === 'Não mencionado') {
                 $contactCompany = null;
             }
-
-            // Agora, os valores de spin_data virão como strings vazias se não qualificados
-            $spinData = $geminiResponse['spin_data'] ?? [
-                'situacao' => '',
-                'problema' => '',
-                'implicacao' => '',
-                'necessidade' => ''
-            ];
-            $bantData = $geminiResponse['bant_data'] ?? [
-                'budget' => '',
-                'authority' => '',
-                'need' => '',
-                'timeline' => ''
-            ];
             
             $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
 
@@ -260,57 +246,7 @@ class ProcessWhatsappMessage implements ShouldQueue
             Activity::create($activityData);
             Log::info('Resposta do Gemini adicionada como atividade.');
 
-            // --- 5. Salvar dados de SPIN e BANT como ATIVIDADES do tipo 'note' (se houver dados qualificados) ---
-            if (!empty($spinData)) {
-                $spinNote = "Dados SPIN:\n";
-                foreach ($spinData as $key => $value) {
-                    // Agora, verifica se o valor não é uma string vazia para adicionar à nota
-                    if (!empty($value)) {
-                        $spinNote .= ucfirst($key) . ": " . $value . "\n";
-                    }
-                }
-                // Ajusta o comprimento mínimo para a nota, já que "Não qualificado" não será mais adicionado por padrão
-                if (strlen($spinNote) > 13) { // Se houver algo além do cabeçalho "Dados SPIN:\n"
-                    $activityData['title'] = 'Qualificação SPIN';
-                    $activityData['description'] = $spinNote;
-                    $activityData['type'] = 'note';
-                    $activityData['schedule_from'] = now();
-                    $activityData['schedule_to'] = now();
-
-                    if ($lead) {
-                        $activityData['lead_id'] = $lead->id;
-                    } else {
-                        unset($activityData['lead_id']);
-                    }
-                    Activity::create($activityData);
-                    Log::info('Dados SPIN adicionados como nota de atividade.');
-                }
-            }
-
-            if (!empty($bantData)) {
-                $bantNote = "Dados BANT:\n";
-                foreach ($bantData as $key => $value) {
-                    // Agora, verifica se o valor não é uma string vazia para adicionar à nota
-                    if (!empty($value)) {
-                        $bantNote .= ucfirst($key) . ": " . $value . "\n";
-                    }
-                }
-                if (strlen($bantNote) > 13) { // Se houver algo além do cabeçalho "Dados BANT:\n"
-                    $activityData['title'] = 'Qualificação BANT';
-                    $activityData['description'] = $bantNote;
-                    $activityData['type'] = 'note';
-                    $activityData['schedule_from'] = now();
-                    $activityData['schedule_to'] = now();
-
-                    if ($lead) {
-                        $activityData['lead_id'] = $lead->id;
-                    } else {
-                        unset($activityData['lead_id']);
-                    }
-                    Activity::create($activityData);
-                    Log::info('Dados BANT adicionados como nota de atividade.');
-                }
-            }
+            // --- Removida a lógica de salvar dados de SPIN e BANT como ATIVIDADES ---
 
             Log::info('Processamento da mensagem do WhatsApp concluído.', [
                 'lead_id' => $lead->id ?? 'N/A (Lead não criado)',
@@ -393,56 +329,32 @@ class ProcessWhatsappMessage implements ShouldQueue
         $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
         Log::info('Mensagem do usuário adicionada ao histórico ANTES da chamada Gemini.', ['from' => $from, 'history_length' => count($conversationHistory)]);
 
-        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é qualificar leads usando a metodologia SPIN e coletar o nome do cliente e o nome da empresa.
+        $systemInstructionText = "Você é um assistente de pré-atendimento de vendas via WhatsApp para a PipeGrow CRM. Seu objetivo é coletar o nome do cliente e o nome da empresa.
 
         Instruções gerais:
         - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
-        - Certifique-se de que TODAS as chaves JSON esperadas (pre_attendance_text, contact_name, contact_email, contact_company, spin_data, bant_data) estejam presentes.
-        - Os valores de 'contact_email', e todos os campos dentro de 'bant_data' devem ser uma string vazia (\" \").
+        - Certifique-se de que TODAS as chaves JSON esperadas (pre_attendance_text, contact_name, contact_email, contact_company) estejam presentes.
+        - Os valores de 'contact_email' devem ser uma string vazia (\" \").
         - Os valores de 'contact_name' e 'contact_company' devem ser o dado qualificado ou \"\" se não obtido.
-        - Os valores de 'spin_data' (situacao, problema, implicacao, necessidade) devem ser APENAS a qualificação direta e concisa (ex: 'Não gerencia vendas', 'Perda de clientes', 'Impacto na receita', 'CRM com automação') ou uma string vazia (\" \") se a informação ainda não foi obtida. NÃO inclua perguntas, exemplos, ou qualquer texto adicional, como 'Ainda não perguntado' ou 'Aguardando resposta'.
-        - NÃO faça perguntas BANT.
-        - NÃO peça e-mail.
         - Mantenha a conversa fluida e natural, fazendo UMA pergunta por vez no 'pre_attendance_text'.
 
         Contexto atual do cliente (informações já conhecidas):
         - Nome: '" . ($knownContactName === 'Não conhecido' ? '' : $knownContactName) . "'
         - Empresa: '" . ($knownContactCompany === 'Não conhecido' ? '' : $knownContactCompany) . "'
-        - Situação (SPIN): '" . ($spinData['situacao'] ?? '') . "'
-        - Problema (SPIN): '" . ($spinData['problema'] ?? '') . "'
-        - Implicação (SPIN): '" . ($spinData['implicacao'] ?? '') . "'
-        - Necessidade (SPIN): '" . ($spinData['necessidade'] ?? '') . "'
 
         Com base no contexto e na última mensagem do cliente: \"{$message}\", determine a próxima ação e preencha o JSON.
 
         Lógica para 'pre_attendance_text' (a mensagem para o cliente):
         1. Se o nome do cliente no contexto for vazio: Pergunte o nome completo.
         2. Se o nome do cliente for conhecido, mas a empresa no contexto for vazia: Pergunte o nome da empresa.
-        3. Se nome e empresa forem conhecidos:
-           a. Se 'situacao' no contexto for vazia: Pergunte sobre a situação atual (SPIN). Ex: 'Como você gerencia seus processos de vendas atualmente?'
-           b. Se 'situacao' for qualificada, mas 'problema' no contexto for vazia: Pergunte sobre o problema (SPIN). Ex: 'Quais são os maiores desafios que sua equipe de vendas enfrenta?'
-           c. Se 'problema' for qualificado, mas 'implicacao' no contexto for vazia: Pergunte sobre a implicação (SPIN). Ex: 'Como esses desafios impactam seus resultados de vendas?'
-           d. Se 'implicacao' for qualificada, mas 'necessidade' no contexto for vazia: Pergunte sobre a necessidade de solução (SPIN). Ex: 'O que você espera de uma nova ferramenta de CRM?'
-           e. Se todas as informações (nome, empresa, e todas as etapas SPIN) forem qualificadas: Informe que um especialista entrará em contato em breve.
+        3. Se nome e empresa forem conhecidos: Informe que um especialista entrará em contato em breve.
 
         A estrutura JSON COMPLETA esperada é:
         {
             \"pre_attendance_text\": \"<texto de pré-atendimento, contendo a próxima pergunta ou a finalização>\",
             \"contact_name\": \"<nome do contato ou \"\">\",
             \"contact_email\": \"\",
-            \"contact_company\": \"<nome da empresa ou \"\">\",
-            \"spin_data\": {
-                \"situacao\": \"<qualificação da situação ou \"\">\",
-                \"problema\": \"<qualificação do problema ou \"\">\",
-                \"implicacao\": \"<qualificação da implicação ou \"\">\",
-                \"necessidade\": \"<qualificação da necessidade ou \"\">\"
-            },
-            \"bant_data\": {
-                \"budget\": \"\",
-                \"authority\": \"\",
-                \"need\": \"\",
-                \"timeline\": \"\"
-            }
+            \"contact_company\": \"<nome da empresa ou \"\">\"
         }
         ";
 
@@ -467,27 +379,9 @@ class ProcessWhatsappMessage implements ShouldQueue
                             "contact_name" => ["type" => "STRING"],
                             "contact_email" => ["type" => "STRING"],
                             "contact_company" => ["type" => "STRING"], // Adicionado o nome da empresa
-                            "spin_data" => [
-                                "type" => "OBJECT",
-                                "properties" => [
-                                    "situacao" => ["type" => "STRING"],
-                                    "problema" => ["type" => "STRING"],
-                                    "implicacao" => ["type" => "STRING"],
-                                    "necessidade" => ["type" => "STRING"],
-                                ],
-                            ],
-                            "bant_data" => [
-                                "type" => "OBJECT",
-                                "properties" => [
-                                    "budget" => ["type" => "STRING"],
-                                    "authority" => ["type" => "STRING"],
-                                    "need" => ["type" => "STRING"],
-                                    "timeline" => ["type" => "STRING"],
-                                ],
-                            ],
                         ],
                         "propertyOrdering" => [
-                            "pre_attendance_text", "contact_name", "contact_email", "contact_company", "spin_data", "bant_data"
+                            "pre_attendance_text", "contact_name", "contact_email", "contact_company"
                         ],
                     ],
                 ],
@@ -556,18 +450,6 @@ class ProcessWhatsappMessage implements ShouldQueue
             'contact_name'        => 'Não conhecido',
             'contact_email'       => '', // Alterado para string vazia
             'contact_company'     => '', // Alterado para string vazia
-            'spin_data'           => [
-                'situacao'   => '', // Alterado para string vazia
-                'problema'   => '', // Alterado para string vazia
-                'implicacao' => '', // Alterado para string vazia
-                'necessidade' => ''  // Alterado para string vazia
-            ],
-            'bant_data'           => [
-                'budget'    => '', // Alterado para string vazia
-                'authority' => '', // Alterado para string vazia
-                'need'      => '', // Alterado para string vazia
-                'timeline'  => ''  // Alterado para string vazia
-            ]
         ];
     }
 
