@@ -132,11 +132,16 @@ class ProcessWhatsappMessage implements ShouldQueue
                     Log::warning('Nenhum usuário padrão encontrado para atribuir a nova pessoa. A pessoa foi criada sem atribuição de usuário.');
                 }
             } else {
-                // Atualiza o nome da pessoa se o Gemini forneceu um nome mais específico
-                if (!empty($contactName) && $contactName !== $person->name && !str_starts_with($contactName, 'Cliente WhatsApp ')) {
+                // Atualiza o nome da pessoa se o Gemini forneceu um nome mais específico E se o nome atual não é um placeholder
+                if (!empty($contactName) && $contactName !== $person->name && !str_starts_with($person->name, 'Cliente WhatsApp ')) {
                     $person->update(['name' => $contactName]);
                     Log::info('Nome da pessoa atualizado pelo Gemini: ' . $contactName);
+                } elseif (str_starts_with($person->name, 'Cliente WhatsApp ') && !empty($contactName)) {
+                     // Se o nome atual é um placeholder e o Gemini forneceu um nome, atualiza
+                    $person->update(['name' => $contactName]);
+                    Log::info('Nome placeholder da pessoa atualizado pelo Gemini: ' . $contactName);
                 }
+
                 // Tenta atualizar o email se o Gemini forneceu um email e ele ainda não existe
                 if (!empty($contactEmail)) {
                     $emails = json_decode($person->emails, true) ?? [];
@@ -202,10 +207,11 @@ class ProcessWhatsappMessage implements ShouldQueue
             // Acessa o nome da organização de forma segura para a lógica de estado
             $personOrganizationName = optional($person->organization)->name;
 
-            if (empty($person->name) || $person->name === 'Não conhecido' || str_starts_with($person->name, 'Cliente WhatsApp ')) {
+            // Lógica de estado aprimorada
+            if (empty($person->name) || str_starts_with($person->name, 'Cliente WhatsApp ')) {
                 $preAttendanceText = "Olá! Qual é o seu nome completo?";
                 $nextState = 'awaiting_name';
-            } elseif (empty($person->organization_id) || empty($personOrganizationName) || $personOrganizationName === 'Não conhecido') {
+            } elseif (empty($person->organization_id) || empty($personOrganizationName)) {
                 $preAttendanceText = "Olá, " . $person->name . "! Qual o nome da empresa que você representa?";
                 $nextState = 'awaiting_company';
             } else {
@@ -340,9 +346,10 @@ class ProcessWhatsappMessage implements ShouldQueue
         Instruções gerais:
         - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
         - Certifique-se de que TODAS as chaves JSON esperadas (pre_attendance_text, contact_name, contact_email, contact_company) estejam presentes.
-        - Os valores de 'contact_email' devem ser uma string vazia (\" \").
-        - Os valores de 'contact_name' e 'contact_company' devem ser o dado qualificado extraído da *última mensagem do cliente* ou \"\" se não obtido.
-        - O 'pre_attendance_text' deve ser uma confirmação da informação extraída ou uma saudação, NUNCA uma pergunta. A pergunta será gerada no backend.
+        - O valor de 'contact_email' DEVE ser uma string vazia (\" \").
+        - O valor de 'contact_name' DEVE ser o nome completo do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactName' do contexto se não houver um novo nome na última mensagem. Se 'knownContactName' for 'Não conhecido', então use \"\".
+        - O valor de 'contact_company' DEVE ser o nome da empresa do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactCompany' do contexto se não houver um novo nome de empresa na última mensagem. Se 'knownContactCompany' for 'Não conhecido', então use \"\".
+        - O 'pre_attendance_text' DEVE ser uma confirmação da informação extraída ou uma saudação, NUNCA uma pergunta. A pergunta será gerada no backend.
 
         Contexto atual do cliente (informações já conhecidas do CRM):
         - Nome: '" . ($knownContactName === 'Não conhecido' ? '' : $knownContactName) . "'
@@ -359,9 +366,9 @@ class ProcessWhatsappMessage implements ShouldQueue
         A estrutura JSON COMPLETA esperada é:
         {
             \"pre_attendance_text\": \"<texto de confirmação ou saudação>\",
-            \"contact_name\": \"<nome do contato extraído ou \"\">\",
+            \"contact_name\": \"<nome do contato extraído ou o nome conhecido, ou \"\">\",
             \"contact_email\": \"\",
-            \"contact_company\": \"<nome da empresa extraído ou \"\">\"
+            \"contact_company\": \"<nome da empresa extraído ou o nome da empresa conhecida, ou \"\">\"
         }
         ";
 
