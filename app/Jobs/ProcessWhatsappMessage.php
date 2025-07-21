@@ -74,9 +74,25 @@ class ProcessWhatsappMessage implements ShouldQueue
             // --- Extrair nome do contato do payload do webhook (se disponível) ---
             $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
             
+            // --- Tente encontrar a pessoa (contato) para obter o nome e e-mail conhecidos ---
+            $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
+            $knownContactNameForGemini = 'A ser qualificado';
+            $knownContactEmailForGemini = 'A ser qualificado';
+
+            if ($person) {
+                $knownContactNameForGemini = $person->name;
+                $emails = json_decode($person->emails, true) ?? [];
+                if (!empty($emails)) {
+                    $knownContactEmailForGemini = $emails[0]['value']; // Pega o primeiro email conhecido
+                }
+                Log::info('Pessoa existente encontrada para Gemini context:', ['name' => $person->name, 'email' => $knownContactEmailForGemini]);
+            } else {
+                Log::info('Pessoa não encontrada, Gemini irá começar a qualificação do zero.');
+            }
+
             // --- 1. Pré-atendimento com Gemini 2.5 ---
-            // Nao passamos mais o historico ou nome/email conhecidos, apenas a mensagem atual.
-            $geminiResponse = $this->callGeminiAPI($text);
+            // Passamos o nome e email conhecidos para o Gemini para que ele possa considerar no fluxo
+            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
             // Usar o nome do Gemini se for específico, caso contrário, usar o inicial ou o padrão
@@ -96,10 +112,10 @@ class ProcessWhatsappMessage implements ShouldQueue
             $preAttendanceText = $geminiResponse['pre_attendance_text'] ?? "Olá! Como posso ajudar você hoje?";
 
 
-            // --- 2. Tente encontrar ou criar uma pessoa (contato) ---
-            $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
-
+            // --- 2. (Re)Tente encontrar ou criar uma pessoa (contato) após a resposta do Gemini ---
+            // Isso é importante caso o Gemini tenha extraído um nome/email que ainda não estava no CRM.
             if (!$person) {
+                // Se a pessoa não foi encontrada inicialmente, tenta criar agora com o nome/email do Gemini
                 Log::info('Pessoa não encontrada, criando nova pessoa para o número: ' . $from);
                 $defaultUser = User::first(); 
 
@@ -393,12 +409,12 @@ class ProcessWhatsappMessage implements ShouldQueue
 
         ";
 
-        // Constrói o array de 'contents' com o histórico e a nova mensagem
-        $contents = [];
-        // Adiciona a instrução do sistema como a primeira parte da conversa para guiar o modelo
-        $contents[] = ['role' => 'user', 'parts' => [['text' => $prompt]]]; // O prompt completo é a instrução inicial
-        $contents[] = ['role' => 'user', 'parts' => [['text' => "Mensagem do cliente: \"{$message}\""]]];
-
+        // O array 'contents' agora conterá apenas a instrução do sistema e a mensagem atual do usuário.
+        // O histórico de conversa não é mais mantido no banco de dados para cada turno.
+        $contents = [
+            ['role' => 'user', 'parts' => [['text' => $prompt]]], // O prompt completo é a instrução inicial
+            ['role' => 'user', 'parts' => [['text' => "Mensagem do cliente: \"{$message}\""]]],
+        ];
 
         try {
             $response = Http::timeout(60)->post($apiUrl, [ // Aumentado o tempo limite para 60 segundos
