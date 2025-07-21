@@ -79,12 +79,6 @@ class ProcessWhatsappMessage implements ShouldQueue
             $knownContactNameForGemini = 'A ser qualificado';
             $knownContactEmailForGemini = 'A ser qualificado';
 
-            // Chave para o histórico de conversa no cache (baseada no número do remetente)
-            $cacheKeyConversation = 'whatsapp_conversation_history_' . $from;
-            // Carrega o histórico de conversa do cache
-            $conversationHistory = Cache::get($cacheKeyConversation, []);
-            Log::info('Histórico de conversa carregado do cache:', ['from' => $from, 'history_length' => count($conversationHistory)]);
-
             if ($person) {
                 $knownContactNameForGemini = $person->name;
                 $emails = json_decode($person->emails, true) ?? [];
@@ -97,8 +91,8 @@ class ProcessWhatsappMessage implements ShouldQueue
             }
 
             // --- 1. Pré-atendimento com Gemini 2.5 ---
-            // Passamos o nome, email conhecidos e o histórico de conversa para o Gemini
-            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $conversationHistory);
+            // Passamos o nome, email conhecidos e o número 'from' para o Gemini gerenciar o histórico
+            $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $from);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
             // Usar o nome do Gemini se for específico, caso contrário, usar o inicial ou o padrão
@@ -318,15 +312,6 @@ class ProcessWhatsappMessage implements ShouldQueue
             // --- 6. Enviar resposta de volta para o WhatsApp ---
             $this->sendWhatsappMessage($from, $preAttendanceText);
 
-            // --- 7. Salvar o histórico da conversa no cache ---
-            // Adiciona a mensagem do usuário e a resposta do modelo ao histórico
-            $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $text]]];
-            $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $preAttendanceText]]];
-            
-            // Define um tempo de vida para o cache (ex: 60 minutos)
-            Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60)); 
-            Log::info('Histórico da conversa atualizado no cache.', ['from' => $from, 'history_length' => count($conversationHistory)]);
-
             // Marca a mensagem de webhook como processada no cache de idempotência
             if ($messageId) {
                 Cache::put($cacheKeyIdempotency, true, now()->addMinutes(60)); // Armazena por 60 minutos
@@ -379,13 +364,19 @@ class ProcessWhatsappMessage implements ShouldQueue
      * @param string $message O texto da mensagem do usuário.
      * @param string $knownContactName O nome do contato já conhecido (do CRM).
      * @param string $knownContactEmail O email do contato já conhecido (do CRM).
-     * @param array $conversationHistory O histórico da conversa com o Gemini.
+     * @param string $from O número de telefone formatado do remetente (para chave de cache).
      * @return array A resposta processada do Gemini.
      */
-    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, array $conversationHistory): array
+    protected function callGeminiAPI(string $message, string $knownContactName, string $knownContactEmail, string $from): array
     {
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
+
+        // Chave para o histórico de conversa no cache (baseada no número do remetente)
+        $cacheKeyConversation = 'whatsapp_conversation_history_' . $from;
+        // Carrega o histórico de conversa do cache
+        $conversationHistory = Cache::get($cacheKeyConversation, []);
+        Log::info('Histórico de conversa carregado do cache em callGeminiAPI:', ['from' => $from, 'history_length' => count($conversationHistory)]);
 
         // Define o contexto atual para o Gemini
         $contextualPrompt = "Contexto atual: ";
@@ -425,8 +416,8 @@ class ProcessWhatsappMessage implements ShouldQueue
         - 'pre_attendance_text': O texto de pré-atendimento para o cliente.
         - 'contact_name': O nome completo do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar um nome claro na mensagem ATUAL, use o valor do CONTEXTO ATUAL ('{$knownContactName}').
         - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem ATUAL. Se não encontrar, use o valor do CONTEXTO ATUAL ('{$knownContactEmail}').
-        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
-        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL.
+        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL. NUNCA inclua explicações sobre 'Não qualificado', apenas o valor.
+        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições CONCISAS (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem ATUAL. NUNCA inclua explicações sobre 'Não qualificado', apenas o valor.
         ";
 
         // Constrói o array 'contents' para a API do Gemini
@@ -434,14 +425,14 @@ class ProcessWhatsappMessage implements ShouldQueue
 
         // Adiciona a instrução do sistema como o primeiro turno 'user' se o histórico estiver vazio
         // ou se o histórico não começar com a instrução do sistema (para garantir que ela esteja sempre lá)
-        if (empty($conversationHistory) || ($conversationHistory[0]['role'] !== 'user' || $conversationHistory[0]['parts'][0]['text'] !== $systemInstructionText)) {
+        if (empty($conversationHistory) || !isset($conversationHistory[0]['parts'][0]['text']) || $conversationHistory[0]['parts'][0]['text'] !== $systemInstructionText) {
             $contents[] = ['role' => 'user', 'parts' => [['text' => $systemInstructionText]]];
         }
         
         // Adiciona os turnos existentes do histórico (se houver e se já não adicionamos a instrução)
         foreach ($conversationHistory as $turn) {
             // Evita adicionar a instrução do sistema novamente se ela já foi adicionada no início
-            if ($turn['role'] === 'user' && $turn['parts'][0]['text'] === $systemInstructionText && !empty($contents)) {
+            if ($turn['role'] === 'user' && isset($turn['parts'][0]['text']) && $turn['parts'][0]['text'] === $systemInstructionText && !empty($contents)) {
                 continue;
             }
             $contents[] = $turn;
@@ -506,11 +497,18 @@ class ProcessWhatsappMessage implements ShouldQueue
                         $jsonString = substr($jsonString, $jsonStart, $jsonEnd - $jsonStart + 1);
                     } else {
                         Log::warning('Não foi possível encontrar um objeto JSON completo na resposta do Gemini.', ['raw_gemini_response_text' => $jsonString]);
+                        // Se não encontrar JSON válido, retorna a resposta padrão e não adiciona ao histórico
                         return $this->getDefaultGeminiResponse();
                     }
 
                     $parsedJson = json_decode($jsonString, true);
                     if (json_last_error() === JSON_ERROR_NONE) {
+                        // Salva o histórico da conversa no cache APENAS se o JSON for válido
+                        $conversationHistory[] = ['role' => 'user', 'parts' => [['text' => $message]]];
+                        $conversationHistory[] = ['role' => 'model', 'parts' => [['text' => $parsedJson['pre_attendance_text']]]];
+                        Cache::put($cacheKeyConversation, $conversationHistory, now()->addMinutes(60)); // Define um tempo de vida para o cache (ex: 60 minutos)
+                        Log::info('Histórico da conversa atualizado no cache em callGeminiAPI.', ['from' => $from, 'history_length' => count($conversationHistory)]);
+
                         return $parsedJson;
                     } else {
                         Log::error('Erro ao decodificar JSON da resposta do Gemini: ' . json_last_error_msg(), ['json_string_after_cleaning' => $jsonString]);
