@@ -5,9 +5,45 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Jobs\ProcessWhatsappMessage;
 use Illuminate\Support\Facades\Log;
+use Webkul\Contact\Repositories\PersonRepository; // Import PersonRepository
+use Webkul\Lead\Repositories\LeadRepository;     // Import LeadRepository
+use Webkul\Lead\Repositories\SourceRepository;   // Import SourceRepository
 
 class WhatsappWebhookController extends Controller
 {
+    /**
+     * @var \Webkul\Contact\Repositories\PersonRepository
+     */
+    protected PersonRepository $personRepository;
+
+    /**
+     * @var \Webkul\Lead\Repositories\LeadRepository
+     */
+    protected LeadRepository $leadRepository;
+
+    /**
+     * @var \Webkul\Lead\Repositories\SourceRepository
+     */
+    protected SourceRepository $sourceRepository;
+
+    /**
+     * Create a new controller instance.
+     *
+     * @param \Webkul\Contact\Repositories\PersonRepository $personRepository
+     * @param \Webkul\Lead\Repositories\LeadRepository $leadRepository
+     * @param \Webkul\Lead\Repositories\SourceRepository $sourceRepository
+     * @return void
+     */
+    public function __construct(
+        PersonRepository $personRepository,
+        LeadRepository $leadRepository,
+        SourceRepository $sourceRepository
+    ) {
+        $this->personRepository = $personRepository;
+        $this->leadRepository   = $leadRepository;
+        $this->sourceRepository = $sourceRepository;
+    }
+
     /**
      * Handle WhatsApp webhook verification.
      *
@@ -61,7 +97,12 @@ class WhatsappWebhookController extends Controller
                         if ($change['field'] === 'messages' && isset($change['value']['messages'])) {
                             foreach ($change['value']['messages'] as $message) {
                                 // Despacha o job para processar a mensagem em segundo plano
-                                ProcessWhatsappMessage::dispatch($message);
+                                ProcessWhatsappMessage::dispatch(
+                                    $message,
+                                    $this->personRepository,
+                                    $this->leadRepository,
+                                    $this->sourceRepository
+                                );
                                 Log::info('Job ProcessWhatsappMessage despachado para mensagem:', ['message_id' => $message['id'] ?? 'N/A']);
                             }
                         } elseif ($change['field'] === 'messages' && isset($change['value']['statuses'])) {

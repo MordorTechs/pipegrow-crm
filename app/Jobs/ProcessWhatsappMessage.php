@@ -2,7 +2,7 @@
 
 namespace App\Jobs;
 
-use App\Models\Lead;
+use App\Models\User;
 use App\Models\WhatsappSession;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -10,8 +10,11 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Http; // Para fazer requisições HTTP para a API do Gemini
-use Exception; // Para tratamento de erros
+use Illuminate\Support\Facades\Http;
+use Exception;
+use Webkul\Contact\Repositories\PersonRepository;
+use Webkul\Lead\Repositories\LeadRepository;
+use Webkul\Lead\Repositories\SourceRepository;
 
 class ProcessWhatsappMessage implements ShouldQueue
 {
@@ -19,10 +22,16 @@ class ProcessWhatsappMessage implements ShouldQueue
 
     protected $messageData;
 
+    protected PersonRepository $personRepository;
+
+    protected LeadRepository $leadRepository;
+
+    protected SourceRepository $sourceRepository;
+
     /**
-     * Cria uma nova instância do job.
+     * Create a new job instance.
      *
-     * @param array $messageData Os dados da mensagem de WhatsApp recebida.
+     * @param array $messageData The received WhatsApp message data.
      * @return void
      */
     public function __construct(array $messageData)
@@ -31,46 +40,53 @@ class ProcessWhatsappMessage implements ShouldQueue
     }
 
     /**
-     * Executa o job.
+     * Execute the job.
      *
-     * Este método lida com a mensagem de WhatsApp recebida, gerencia o estado da conversa
-     * para qualificação de leads (SPIN/BANT), interage com a API do Gemini para respostas
-     * personalizadas e cria condicionalmente um lead na base de dados.
+     * This method handles the received WhatsApp message, manages the conversation state
+     * for lead qualification (SPIN/BANT), interacts with the Gemini API for personalized
+     * responses, and conditionally creates a lead in the database.
      *
+     * @param \Webkul\Contact\Repositories\PersonRepository $personRepository
+     * @param \Webkul\Lead\Repositories\LeadRepository $leadRepository
+     * @param \Webkul\Lead\Repositories\SourceRepository $sourceRepository
      * @return void
      */
-    public function handle(): void
+    public function handle(
+        PersonRepository $personRepository,
+        LeadRepository $leadRepository,
+        SourceRepository $sourceRepository
+    ): void
     {
-        // Acesso correto ao número de telefone do remetente
+        // Assign repositories from method injection
+        $this->personRepository = $personRepository;
+        $this->leadRepository   = $leadRepository;
+        $this->sourceRepository = $sourceRepository;
+
+        // Correct access to the sender's phone number
         $from = $this->messageData['from'];
 
-        // CORREÇÃO: Acessar o 'body' da mensagem de texto
-        // O log mostra que $this->messageData['text'] é um array, e a mensagem está em ['text']['body']
+        // Access the 'body' of the text message
         $text = $this->messageData['text']['body'] ?? null;
 
-        // Se a mensagem não tiver um corpo de texto (ex: imagem, vídeo, etc.), podemos ignorar ou lidar de outra forma
+        // If the message has no text body (e.g., image, video, etc.), we can ignore or handle it differently
         if (empty($text)) {
-            Log::warning("ProcessWhatsappMessage: Mensagem não textual ou texto vazio recebido de {$from}. Ignorando.");
+            Log::warning("ProcessWhatsappMessage: Non-textual message or empty text received from {$from}. Ignorando.");
             return;
         }
 
-        Log::info("ProcessWhatsappMessage: Mensagem recebida de {$from}: {$text}");
+        Log::info("ProcessWhatsappMessage: Message received from {$from}: {$text}");
 
-        // Encontra ou cria uma sessão de WhatsApp para o utilizador
+        // Find or create a WhatsApp session for the user
         $session = WhatsappSession::firstOrCreate(
             ['phone_number' => $from],
             [
                 'conversation_history' => [],
                 'qualification_data'   => [],
-                'current_stage'        => 'ask_name', // Novo estágio inicial: pedir nome
+                'current_stage'        => 'initial_greeting', // Changed initial stage
             ]
         );
 
-        // A lógica para redefinir a conversa com base em palavras-chave foi removida.
-        // A sessão agora manterá o histórico e o estado continuamente.
-
-
-        // Adiciona a mensagem do utilizador ao histórico da conversa
+        // Add the user's message to the conversation history
         $history = $session->conversation_history ?? [];
         $history[] = ['role' => 'user', 'parts' => [['text' => $text]]];
         $session->conversation_history = $history;
@@ -78,141 +94,170 @@ class ProcessWhatsappMessage implements ShouldQueue
         $responseMessage = '';
 
         try {
-            // Determina o próximo passo com base na fase atual
-            switch ($session->current_stage) {
-                case 'ask_name':
-                    if (! empty($session->qualification_data['name'])) {
-                        // O nome já foi coletado.
-                        // Prossegue diretamente para a pergunta SPIN 'S'.
-                        $name = $session->qualification_data['name'];
-                        $responseMessage = "Olá novamente, {$name}! ";
-                        $responseMessage .= $this->askSpinQuestion('S', $session); // Passa o nome para a pergunta
-                        $session->current_stage = 'spin_s';
-                    } else {
-                        // O usuário respondeu ao pedido de nome
-                        $session->qualification_data = array_merge($session->qualification_data, ['name' => $text]); // Assume que a primeira resposta é o nome
-                        $name = $session->qualification_data['name'];
-                        $responseMessage = "Obrigado, {$name}! ";
-                        $responseMessage .= $this->askSpinQuestion('S', $session); // Passa o nome para a pergunta
-                        $session->current_stage = 'spin_s';
-                    }
-                    break;
+            // Check for "não sei" or similar evasive answers before processing
+            $normalizedText = mb_strtolower(trim($text));
+            $empatheticResponseNeeded = false;
 
-                case 'initial': // Este caso agora só será atingido se 'ask_name' não for o primeiro estágio
-                    // Isso pode ser um fallback, mas com 'ask_name' como inicial, 'initial' não deve ser o primeiro.
-                    // Mantido para compatibilidade, mas a lógica de 'ask_name' é prioritária.
-                    // Se por algum motivo cair aqui, ainda queremos a pergunta S do SPIN.
-                    $responseMessage = $this->askSpinQuestion('S', $session);
-                    $session->current_stage = 'spin_s';
-                    break;
+            if (in_array($normalizedText, ['não sei', 'nao sei', 'não tenho certeza', 'nao tenho certeza', 'não sei dizer', 'nao sei dizer'])) {
+                $empatheticResponseNeeded = true;
+            }
 
-                case 'spin_s':
-                    $session->qualification_data = array_merge($session->qualification_data, ['spin_situation' => $text]);
-                    $responseMessage = $this->askSpinQuestion('P', $session);
-                    $session->current_stage = 'spin_p';
-                    break;
+            // Special handling for the very first message to ensure proper greeting
+            if ($session->current_stage === 'initial_greeting') {
+                $responseMessage = "Olá! Sou o assistente virtual do PipeGrow Ads. Para começarmos, qual é o seu nome?";
+                $session->current_stage = 'awaiting_name_response';
+            } elseif ($empatheticResponseNeeded && $session->current_stage !== 'awaiting_name_response') { // Don't apply empathy for initial name request
+                $name = $session->qualification_data['name'] ?? 'cliente';
+                $responseMessage = "Compreendo, {$name}. É normal ter dúvidas. Poderia tentar descrever com outras palavras ou me dar um exemplo? Ou talvez eu possa reformular a pergunta de outra forma.";
+                // Do NOT change $session->current_stage here, so the same question is implicitly re-asked.
+            } else {
+                // Normal flow based on current_stage
+                switch ($session->current_stage) {
+                    case 'awaiting_name_response':
+                        // Only process name if it's not a generic greeting (e.g., "Olá")
+                        if (mb_strtolower(trim($text)) !== 'olá' && mb_strtolower(trim($text)) !== 'ola') {
+                            $qualificationData = $session->qualification_data; // Get a mutable copy
+                            $qualificationData['name'] = $text;
+                            $session->qualification_data = $qualificationData; // Reassign the modified copy
 
-                case 'spin_p':
-                    $session->qualification_data = array_merge($session->qualification_data, ['spin_problem' => $text]);
-                    $responseMessage = $this->askSpinQuestion('I', $session);
-                    $session->current_stage = 'spin_i';
-                    break;
+                            $name = $session->qualification_data['name'];
+                            $responseMessage = "Obrigado, {$name}! Para te ajudar melhor, poderia me descrever a *Situação* atual da sua empresa ou do seu desafio? O que você está fazendo atualmente?";
+                            $session->current_stage = 'spin_s';
+                        } else {
+                            // If user just repeated "Olá" while we expected a name, re-ask for name
+                            $responseMessage = "Olá novamente! Para que eu possa te ajudar, preciso do seu nome. Poderia me dizer qual é?";
+                            // Keep current_stage as 'awaiting_name_response'
+                        }
+                        break;
 
-                case 'spin_i':
-                    $session->qualification_data = array_merge($session->qualification_data, ['spin_implication' => $text]);
-                    $responseMessage = $this->askSpinQuestion('N', $session);
-                    $session->current_stage = 'spin_n';
-                    break;
+                    case 'spin_s':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['spin_situation'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askSpinQuestion('P', $session);
+                        $session->current_stage = 'spin_p';
+                        break;
 
-                case 'spin_n':
-                    $session->qualification_data = array_merge($session->qualification_data, ['spin_need_payoff' => $text]);
-                    $responseMessage = $this->askBantQuestion('B', $session);
-                    $session->current_stage = 'bant_b';
-                    break;
+                    case 'spin_p':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['spin_problem'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askSpinQuestion('I', $session);
+                        $session->current_stage = 'spin_i';
+                        break;
 
-                case 'bant_b':
-                    $session->qualification_data = array_merge($session->qualification_data, ['bant_budget' => $text]);
-                    $responseMessage = $this->askBantQuestion('A', $session);
-                    $session->current_stage = 'bant_a';
-                    break;
+                    case 'spin_i':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['spin_implication'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askSpinQuestion('N', $session);
+                        $session->current_stage = 'spin_n';
+                        break;
 
-                case 'bant_a':
-                    $session->qualification_data = array_merge($session->qualification_data, ['bant_authority' => $text]);
-                    $responseMessage = $this->askBantQuestion('N', $session);
-                    $session->current_stage = 'bant_n';
-                    break;
+                    case 'spin_n':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['spin_need_payoff'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askBantQuestion('B', $session);
+                        $session->current_stage = 'bant_b';
+                        break;
 
-                case 'bant_n':
-                    $session->qualification_data = array_merge($session->qualification_data, ['bant_need' => $text]);
-                    $responseMessage = $this->askBantQuestion('T', $session);
-                    $session->current_stage = 'bant_t';
-                    break;
+                    case 'bant_b':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['bant_budget'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askBantQuestion('A', $session);
+                        $session->current_stage = 'bant_a';
+                        break;
 
-                case 'bant_t':
-                    $session->qualification_data = array_merge($session->qualification_data, ['bant_timeline' => $text]);
+                    case 'bant_a':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['bant_authority'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askBantQuestion('N', $session);
+                        $session->current_stage = 'bant_n';
+                        break;
 
-                    // Todos os dados de qualificação recolhidos, agora processa e cria o lead
-                    $qualificationResult = $this->evaluateQualification($session->qualification_data);
+                    case 'bant_n':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['bant_need'] = $text;
+                        $session->qualification_data = $qualificationData;
+                        $responseMessage = $this->askBantQuestion('T', $session);
+                        $session->current_stage = 'bant_t';
+                        break;
 
-                    if ($qualificationResult['qualified']) {
-                        $lead = $this->createLeadFromQualificationData($from, $session->qualification_data);
-                        $session->lead_id = $lead->id;
-                        $session->current_stage = 'qualified';
-                        $responseMessage = "Excelente! Com base nas suas respostas, criamos um novo lead para você. Seu ID de lead é: {$lead->id}. Em breve um de nossos especialistas entrará em contato para dar continuidade ao atendimento. " . $qualificationResult['summary'];
-                    } else {
-                        $session->current_stage = 'unqualified';
-                        $responseMessage = "Agradecemos o seu interesse. No momento, não conseguimos prosseguir com a criação do lead com as informações fornecidas. " . $qualificationResult['summary'] . " Se desejar, podemos tentar novamente ou fornecer mais informações.";
-                    }
-                    break;
+                    case 'bant_t':
+                        $qualificationData = $session->qualification_data;
+                        $qualificationData['bant_timeline'] = $text;
+                        $session->qualification_data = $qualificationData;
 
-                case 'qualified':
-                    $responseMessage = $this->getGeminiPersonalizedResponse($history, "O lead já foi criado. Como posso ajudar com outras dúvidas sobre o seu lead {$session->lead_id}?");
-                    break;
+                        // All qualification data collected, now process and create the lead
+                        $qualificationResult = $this->evaluateQualification($session->qualification_data);
 
-                case 'unqualified':
-                    $responseMessage = $this->getGeminiPersonalizedResponse($history, "O atendimento foi concluído, mas o lead não foi criado. Como posso ajudar com outras informações ou tentar novamente a qualificação?");
-                    break;
+                        if ($qualificationResult['qualified']) {
+                            $lead = $this->createLeadFromQualificationData($from, $session->qualification_data);
+                            $session->lead_id = $lead->id;
+                            $session->current_stage = 'qualified';
+                            // Modified response message for qualified lead: removed summary
+                            $responseMessage = "Excelente! Agradecemos o seu tempo. Em breve um de nossos especialistas entrará em contato para dar continuidade ao atendimento.";
+                        } else {
+                            $session->current_stage = 'unqualified';
+                            $responseMessage = "Agradecemos o seu interesse. No momento, não conseguimos prosseguir com a criação do lead com as informações fornecidas. " . $qualificationResult['summary'] . " Se desejar, podemos tentar novamente ou fornecer mais informações.";
+                        }
+                        break;
 
-                default:
-                    // Fallback para estados inesperados, usa Gemini para resposta geral
-                    $responseMessage = $this->getGeminiPersonalizedResponse($history, "Desculpe, não entendi. Poderia reformular ou me dizer como posso ajudar?");
-                    break;
+                    case 'qualified':
+                        $responseMessage = $this->getGeminiPersonalizedResponse($history, "O lead já foi criado. Como posso ajudar com outras dúvidas sobre o seu lead {$session->lead_id}?");
+                        break;
+
+                    case 'unqualified':
+                        $responseMessage = $this->getGeminiPersonalizedResponse($history, "O atendimento foi concluído, mas o lead não foi criado. Como posso ajudar com outras informações ou tentar novamente a qualificação?");
+                        break;
+
+                    default:
+                        // Fallback for unexpected states, use Gemini for general response
+                        $responseMessage = $this->getGeminiPersonalizedResponse($history, "Desculpe, não entendi. Poderia reformular ou me dizer como posso ajudar?");
+                        break;
+                }
             }
         } catch (Exception $e) {
-            Log::error("Erro ao processar mensagem de WhatsApp para {$from}: " . $e->getMessage());
+            Log::error("Error processing WhatsApp message for {$from}: " . $e->getMessage());
             $responseMessage = "Desculpe, ocorreu um erro ao processar sua solicitação. Por favor, tente novamente mais tarde.";
         }
 
-        // Salva o estado atualizado da sessão
+        // Save the updated session state
         $session->save();
 
-        // Envia a resposta de volta ao utilizador
+        // Removed the sleep(2) here
+        // sleep(2); // Wait for 2 seconds
+
+        // Send the response back to the user
         $this->sendWhatsappMessage($from, $responseMessage);
     }
 
     /**
-     * Envia uma mensagem de WhatsApp para o destinatário especificado.
-     * Este método normalmente interagiria com uma API de WhatsApp (ex: Cloud API da Meta, Twilio, etc.).
+     * Sends a WhatsApp message to the specified recipient.
+     * This method would typically interact with a WhatsApp API (e.g., Meta Cloud API, Twilio, etc.).
      *
-     * @param string $to O número de telefone do destinatário.
-     * @param string $message A mensagem a enviar.
+     * @param string $to The recipient's phone number.
+     * @param string $message The message to send.
      * @return void
      */
     private function sendWhatsappMessage(string $to, string $message): void
     {
-        // Normaliza o número de telefone para garantir o formato correto (especialmente para números brasileiros)
+        // Normalize the phone number to ensure the correct format (especialy for Brazilian numbers)
         $normalizedTo = $this->normalizeBrazilianPhoneNumber($to);
 
         try {
-            // Exemplo de como usar a API da Meta WhatsApp Business
-            // Você precisará do seu Token de Acesso Permanente e do ID do seu Número de Telefone
+            // Example of how to use the Meta WhatsApp Business API
+            // You will need your Permanent Access Token and your Phone Number ID
             $whatsappApiUrl = "https://graph.facebook.com/v19.0/" . env('WHATSAPP_PHONE_NUMBER_ID') . "/messages";
             $accessToken = env('WHATSAPP_ACCESS_TOKEN');
 
             if (empty($whatsappApiUrl) || empty($accessToken)) {
-                Log::error("WHATSAPP_PHONE_NUMBER_ID ou WHATSAPP_ACCESS_TOKEN não configurados no .env.");
-                // Em um ambiente de produção, você pode querer lançar uma exceção ou ter um fallback
-                Log::info("Mensagem de WhatsApp SIMULADA enviada para {$normalizedTo}: {$message}");
+                Log::error("WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN not configured in .env.");
+                // In a production environment, you might want to throw an exception or have a fallback
+                Log::info("SIMULATED WhatsApp message sent to {$normalizedTo}: {$message}");
                 return;
             }
 
@@ -221,7 +266,7 @@ class ProcessWhatsappMessage implements ShouldQueue
                 'Content-Type'  => 'application/json',
             ])->post($whatsappApiUrl, [
                 'messaging_product' => 'whatsapp',
-                'to'                => $normalizedTo, // Usa o número normalizado aqui
+                'to'                => $normalizedTo, // Use the normalized number here
                 'type'              => 'text',
                 'text'              => [
                     'body' => $message,
@@ -229,39 +274,39 @@ class ProcessWhatsappMessage implements ShouldQueue
             ]);
 
             if ($response->successful()) {
-                Log::info("Mensagem de WhatsApp REAL enviada para {$normalizedTo}: {$message}");
+                Log::info("REAL WhatsApp message sent to {$normalizedTo}: {$message}");
             } else {
-                Log::error("Falha ao enviar mensagem de WhatsApp para {$normalizedTo}. Resposta: " . $response->body());
-                // Fallback para log se o envio real falhar
+                Log::error("Failed to send WhatsApp message to {$normalizedTo}. Resposta: " . $response->body());
+                // Fallback to log if the real send fails
                 Log::info("Mensagem de WhatsApp SIMULADA enviada para {$normalizedTo}: {$message}");
             }
         } catch (Exception $e) {
-            Log::error("Erro ao tentar enviar mensagem de WhatsApp REAL para {$normalizedTo}: " . $e->getMessage());
-            // Fallback para log em caso de exceção na chamada HTTP
+            Log::error("Error trying to send REAL WhatsApp message to {$normalizedTo}: " . $e->getMessage());
+            // Fallback to log in case of an HTTP call exception
             Log::info("Mensagem de WhatsApp SIMULADA enviada para {$normalizedTo}: {$message}");
         }
     }
 
     /**
-     * Normaliza números de telefone brasileiros, adicionando o '9' se estiver em falta.
-     * Assume que o número já vem com o código do país (55) e o DDD.
+     * Normalizes Brazilian phone numbers, adding '9' if missing.
+     * Assumes the number already comes with the country code (55) and the DDD.
      *
-     * @param string $phoneNumber O número de telefone a normalizar.
-     * @return string O número de telefone normalizado.
+     * @param string $phoneNumber The phone number to normalize.
+     * @return string The normalized phone number.
      */
-    private function normalizeBrazilianPhoneNumber(string $phoneNumber): string
+    public function normalizeBrazilianPhoneNumber(string $phoneNumber): string
     {
-        // Remove caracteres não numéricos
+        // Remove non-numeric characters
         $phoneNumber = preg_replace('/[^0-9]/', '', $phoneNumber);
 
-        // Verifica se é um número brasileiro (começa com 55)
+        // Check if it's a Brazilian number (starts with 55)
         if (substr($phoneNumber, 0, 2) === '55') {
             // Extrai o DDD (2 dígitos após o 55)
             $ddd = substr($phoneNumber, 2, 2);
             // Extrai o restante do número (8 ou 9 dígitos)
             $numberWithoutDdd = substr($phoneNumber, 4);
 
-            // Lista simplificada de DDDs de celular no Brasil
+            // Simplified list of mobile DDDs in Brazil
             $mobileDdds = [
                 '11', '12', '13', '14', '15', '16', '17', '18', '19',
                 '21', '22', '24', '27', '28',
@@ -274,9 +319,9 @@ class ProcessWhatsappMessage implements ShouldQueue
                 '91', '92', '93', '94', '95', '96', '97', '98', '99'
             ];
 
-            // Se o DDD for de celular E o número (após o DDD) tiver 8 dígitos,
-            // então adicionamos o '9' na frente desses 8 dígitos.
-            // Isso cobre casos como 556294123173 (8 dígitos após o DDD) que deve virar 5562994123173.
+            // If the DDD is for mobile AND the number (after DDD) has 8 digits,
+            // then we add '9' in front of those 8 digits.
+            // This covers cases like 556294123173 (8 digits after DDD) which should become 5562994123173.
             if (in_array($ddd, $mobileDdds) && strlen($numberWithoutDdd) === 8) {
                 $phoneNumber = '55' . $ddd . '9' . $numberWithoutDdd;
             }
@@ -286,11 +331,11 @@ class ProcessWhatsappMessage implements ShouldQueue
     }
 
     /**
-     * Faz uma pergunta SPIN específica com base na fase atual.
+     * Asks a specific SPIN question based on the current phase.
      *
-     * @param string $type 'S', 'P', 'I', ou 'N' para Situação, Problema, Implicação, Necessidade-solução.
-     * @param WhatsappSession $session A sessão de WhatsApp atual.
-     * @return string A pergunta a ser feita.
+     * @param string $type 'S', 'P', 'I', or 'N' for Situation, Problem, Implication, Need-payoff.
+     * @param WhatsappSession $session The current WhatsApp session.
+     * @return string The question to be asked.
      */
     private function askSpinQuestion(string $type, WhatsappSession $session): string
     {
@@ -311,31 +356,31 @@ class ProcessWhatsappMessage implements ShouldQueue
                 break;
         }
 
-        // Para a pergunta de Situação (S), retornamos o prompt padrão sem personalização do Gemini.
-        // Isso garante que a primeira pergunta do SPIN é sempre a esperada e direta.
+        // For the Situation (S) question, we return the default prompt without Gemini personalization.
+        // This ensures that the first SPIN question is always the expected and direct one.
         if ($type === 'S') {
             return $prompt;
         }
 
-        // Para as fases seguintes (P, I, N), usamos Gemini para personalizar a pergunta.
-        // O chatHistory já inclui a última mensagem do usuário.
+        // For the subsequent phases (P, I, N), we use Gemini to personalize the question.
+        // The chatHistory already includes the last user message.
         $chatHistory = $session->conversation_history ?? [];
-        $name = $session->qualification_data['name'] ?? 'cliente'; // Pega o nome para personalizar o prompt
+        $name = $session->qualification_data['name'] ?? 'cliente'; // Get the name to personalize the prompt
         $chatHistory[] = [
             'role' => 'user',
             'parts' => [[
-                'text' => "Como um SDR do PipeGrow CRM, qualifique leads usando o framework SPIN. Com base na nossa conversa até agora com {$name}, reescreva de forma natural e direta a seguinte pergunta para a etapa '{$type}': \"{$prompt}\". Sua resposta deve ser APENAS a pergunta reescrita, sem comentários adicionais ou introduções."
+                'text' => "Como um SDR do PipeGrow Ads, qualifique leads usando o framework SPIN. Com base na nossa conversa até agora com {$name}, reescreva de forma natural e direta a seguinte pergunta para a etapa '{$type}': \"{$prompt}\". Sua resposta deve ser APENAS a pergunta reescrita, sem comentários adicionais ou introduções."
             ]]
         ];
         return $this->getGeminiPersonalizedResponse($chatHistory, $prompt);
     }
 
     /**
-     * Faz uma pergunta BANT específica com base na fase atual.
+     * Asks a specific BANT question based on the current phase.
      *
-     * @param string $type 'B', 'A', 'N', ou 'T' para Orçamento, Autoridade, Necessidade, Prazo.
-     * @param WhatsappSession $session A sessão de WhatsApp atual.
-     * @return string A pergunta a ser feita.
+     * @param string $type 'B', 'A', 'N', or 'T' for Budget, Authority, Need, Timeline.
+     * @param WhatsappSession $session The current WhatsApp session.
+     * @return string The question to be asked.
      */
     private function askBantQuestion(string $type, WhatsappSession $session): string
     {
@@ -357,32 +402,32 @@ class ProcessWhatsappMessage implements ShouldQueue
                 break;
         }
 
-        // Para as fases BANT, sempre usamos Gemini para personalizar a pergunta,
-        // pois elas vêm após as perguntas SPIN iniciais.
+        // For BANT phases, we always use Gemini to personalize the question,
+        // as they come after the initial SPIN questions.
         $chatHistory = $session->conversation_history ?? [];
-        $name = $session->qualification_data['name'] ?? 'cliente'; // Pega o nome para personalizar o prompt
+        $name = $session->qualification_data['name'] ?? 'cliente'; // Get the name to personalize the prompt
         $chatHistory[] = [
             'role' => 'user',
             'parts' => [[
-                'text' => "Como um SDR do PipeGrow CRM, qualifique leads usando o framework BANT. Com base na nossa conversa até agora com {$name}, reescreva de forma natural e direta a seguinte pergunta para a etapa '{$type}': \"{$prompt}\". Sua resposta deve ser APENAS a pergunta reescrita, sem comentários adicionais ou introduções."
+                'text' => "Como um SDR do PipeGrow Ads, qualifique leads usando o framework BANT. Com base na nossa conversa até agora com {$name}, reescreva de forma natural e direta a seguinte pergunta para a etapa '{$type}': \"{$prompt}\". Sua resposta deve ser APENAS a pergunta reescrita, sem comentários adicionais ou introduções."
             ]]
         ];
         return $this->getGeminiPersonalizedResponse($chatHistory, $prompt);
     }
 
     /**
-     * Avalia os dados de qualificação recolhidos para determinar se um lead está qualificado.
-     * Este é um exemplo simplificado; a lógica do mundo real seria mais complexa.
+     * Evaluates the collected qualification data to determine if a lead is qualified.
+     * This is a simplified example; real-world logic would be more complex.
      *
-     * @param array $data Os dados de qualificação recolhidos.
+     * @param array $data The collected qualification data.
      * @return array Contém 'qualified' (booleano) e 'summary' (string).
      */
-    private function evaluateQualification(array $data): array
+    public function evaluateQualification(array $data): array
     {
         $qualified = true;
         $summary = "Resumo da qualificação:\n";
 
-        // Lógica básica de qualificação (pode ser expandida)
+        // Basic qualification logic (can be expanded)
         if (empty($data['spin_situation'])) {
             $qualified = false;
             $summary .= "- Situação: Não fornecida.\n";
@@ -398,7 +443,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         }
 
         if (empty($data['bant_budget']) || strtolower($data['bant_budget']) === 'não tenho') {
-            // Uma verificação mais sofisticada envolveria a análise de valores de orçamento
+            // A more sophisticated check would involve analyzing budget values
             $qualified = false;
             $summary .= "- Orçamento: " . $data['bant_budget'] . "\n";
         } else {
@@ -426,8 +471,8 @@ class ProcessWhatsappMessage implements ShouldQueue
             $summary .= "- Prazo: " . $data['bant_timeline'] . "\n";
         }
 
-        // Adicione mais lógica complexa aqui com base nos seus critérios de qualificação específicos
-        // Por exemplo, palavras-chave nas respostas, intervalos de orçamento específicos, etc.
+        // Add more complex logic here based on your specific qualification criteria
+        // For example, keywords in responses, specific budget ranges, etc.
 
         return [
             'qualified' => $qualified,
@@ -436,111 +481,116 @@ class ProcessWhatsappMessage implements ShouldQueue
     }
 
     /**
-     * Cria um novo lead na base de dados a partir dos dados qualificados.
+     * Creates a new lead in the database from the qualified data.
+     * This method now uses the logic provided by the user, adapted for a Job context.
      *
-     * @param string $phoneNumber O número de telefone do lead.
-     * @param array $qualificationData Os dados de qualificação recolhidos.
-     * @return Lead A instância do modelo Lead recém-criada.
+     * @param string $phoneNumber The lead's phone number.
+     * @param array $qualificationData The collected qualification data.
+     * @return \Webkul\Lead\Contracts\Lead The newly created Lead model instance.
      */
-    private function createLeadFromQualificationData(string $phoneNumber, array $qualificationData): Lead
+    private function createLeadFromQualificationData(string $phoneNumber, array $qualificationData): \Webkul\Lead\Contracts\Lead
     {
-        // Extrai dados relevantes para a criação do lead
-        $name = $qualificationData['name'] ?? 'Lead WhatsApp'; // Usa o nome coletado
-        $email = $qualificationData['email'] ?? "{$phoneNumber}@whatsapp.com"; // Assume que o email pode ser recolhido ou usa um padrão
-        $source = $qualificationData['source'] ?? 'WhatsApp'; // Assume que a fonte pode ser recolhida ou usa um padrão
+        // Adapt qualificationData to the structure expected by the provided createlead logic
+        $leadData = [
+            'full_name'    => $qualificationData['name'] ?? 'Lead WhatsApp',
+            'email'        => $qualificationData['email'] ?? "{$phoneNumber}@whatsapp.com",
+            'phone_number' => $this->normalizeBrazilianPhoneNumber($phoneNumber),
+            'message'      => $this->formatQualificationDataForDescription($qualificationData),
+        ];
 
-        // Você precisará mapear os seus dados de qualificação para os campos preenchíveis do seu modelo Lead.
-        // Isto é um placeholder e deve ser ajustado à estrutura real do seu modelo Lead.
-        $lead = Lead::create([
-            'title'              => 'Novo Lead Qualificado via WhatsApp',
-            'description'        => $this->formatQualificationDataForDescription($qualificationData),
-            'lead_pipeline_id'   => 1, // Substitua pelo ID real do pipeline
-            'lead_pipeline_stage_id' => 1, // Substitua pelo ID real da fase inicial
-            'user_id'            => 1, // Atribui a um utilizador padrão ou implementa lógica de atribuição de utilizador
-            'person_id'          => null, // Cria ou liga uma pessoa se necessário
-            'organization_id'    => null, // Cria ou liga uma organização se necessário
-            'lead_source_id'     => $this->getLeadSourceId($source), // Função auxiliar para obter o ID da fonte
-            'lead_type_id'       => $this->getLeadTypeId('default'), // Função auxiliar para obter o ID do tipo
-            'expected_close_date' => now()->addDays(30), // Exemplo: 30 dias a partir de agora
-            'lead_value'         => 0, // Valor inicial, pode ser atualizado mais tarde
-            'status'             => 'open',
-            'created_at'         => now(),
-            'updated_at'         => now(),
-            // Adicione quaisquer outros campos obrigatórios para o seu modelo Lead
+        // Add 'entity_type' for Person creation/update
+        $personData = [
+            'name'            => $leadData['full_name'],
+            'emails'          => [['value' => $leadData['email'], 'label' => 'work']],
+            'contact_numbers' => [['value' => $leadData['phone_number'], 'label' => 'work']],
+            'organization_id' => null,
+            'lead_owner_id'   => User::inRandomOrder()->value('id'), // Assign a random user as owner
+            'entity_type'     => 'persons', // Add entity_type for Person
+        ];
+
+        $existingPerson = $this->personRepository->whereJsonContains('emails', [['value' => $leadData['email'], 'label' => 'work']])->first();
+
+        if ($existingPerson) {
+            $this->personRepository->update($personData, $existingPerson->id);
+            $person = $existingPerson;
+        } else {
+            $person = $this->personRepository->create($personData);
+        }
+
+        // Add 'entity_type' for Lead creation
+        $lead = $this->leadRepository->create([
+            'title'             => 'Lead do WhatsApp: ' . $leadData['full_name'],
+            'lead_pipeline_id'  => 1, // Assuming default pipeline ID 1
+            'lead_stage_id'     => 1, // Assuming default stage ID 1
+            'lead_source_id'    => $this->getWhatsappLeadSourceId(), // Get WhatsApp specific source ID
+            'person_id'         => $person->id,
+            'user_id'           => null, // As per the provided logic, user_id is null
+            'expected_close_date' => now()->addDays(7),
+            'lead_value'        => 0,
+            'description'       => $leadData['message'],
+            'lead_type_id'      => 1, // Assuming default lead type ID 1
+            'entity_type'       => 'leads', // Add entity_type for Lead
         ]);
 
-        Log::info("Lead criado com sucesso para {$phoneNumber} com ID: {$lead->id}");
+        Log::info("Lead created successfully for {$phoneNumber} with ID: {$lead->id}");
 
         return $lead;
     }
 
     /**
-     * Formata os dados de qualificação numa descrição legível para o lead.
+     * Helper function to get the Lead Source ID for WhatsApp.
+     * You might want to create a 'WhatsApp' source in your database and retrieve its ID.
      *
-     * @param array $data Os dados de qualificação recolhidos.
-     * @return string
-     */
-    private function formatQualificationDataForDescription(array $data): string
-    {
-        $description = "Dados de Qualificação (SPIN/BANT) via WhatsApp:\n\n";
-        foreach ($data as $key => $value) {
-            $description .= ucfirst(str_replace('_', ' ', $key)) . ": " . $value . "\n";
-        }
-        return $description;
-    }
-
-    /**
-     * Função auxiliar para obter o ID da Fonte do Lead. Substitua pela sua lógica real.
-     *
-     * @param string $sourceName
      * @return int
      */
-    private function getLeadSourceId(string $sourceName): int 
+    private function getWhatsappLeadSourceId(): int
     {
-        // Exemplo: Buscar da base de dados ou usar um padrão
-        // return \Webkul\Lead\Models\Source::where('name', $sourceName)->first()->id ?? 1;
-        return 1; // Placeholder: Assume ID 1 para a fonte 'WhatsApp'
+        // Attempt to find the 'WhatsApp' source in the database
+        $source = $this->sourceRepository->findOneByField('name', 'WhatsApp');
+
+        // If found, return its ID, otherwise return a default ID (e.g., 1 for 'Default' or 'Other')
+        return $source->id ?? 1;
     }
 
     /**
-     * Função auxiliar para obter o ID do Tipo de Lead. Substitua pela sua lógica real.
+     * Helper function to get the Lead Type ID. Replace with your actual logic.
      *
      * @param string $typeName
      * @return int
      */
     private function getLeadTypeId(string $typeName): int
     {
-        // Exemplo: Buscar da base de dados ou usar um padrão
+        // Example: Fetch from the database or use a default
         // return \Webkul\Lead\Models\Type::where('name', $typeName)->first()->id ?? 1;
-        return 1; // Placeholder: Assume ID 1 para o tipo 'Padrão'
+        return 1; // Placeholder: Assumes ID 1 for the 'Default' type
     }
 
     /**
-     * Interage com a API do Gemini para obter uma resposta personalizada.
+     * Interacts with the Gemini API to get a personalized response.
      *
-     * @param array $chatHistory O histórico da conversa a enviar para o Gemini.
-     * @param string $fallbackMessage Uma mensagem a retornar se a API do Gemini falhar.
-     * @return string A resposta personalizada do Gemini ou a mensagem de fallback.
+     * @param array $chatHistory The conversation history to send to Gemini.
+     * @param string $fallbackMessage A message to return if the Gemini API fails.
+     * @return string The personalized response from Gemini or the fallback message.
      */
     private function getGeminiPersonalizedResponse(array $chatHistory, string $fallbackMessage): string
     {
         try {
-            // Lendo a chave da API do Gemini do arquivo .env
+            // Reading the Gemini API key from the .env file
             $apiKey = env('GEMINI_API_KEY'); 
             
-            // Verifique se a chave da API foi carregada
+            // Check if the API key was loaded
             if (empty($apiKey)) {
-                Log::error("GEMINI_API_KEY não configurada no arquivo .env.");
+                Log::error("GEMINI_API_KEY not configured in the .env file.");
                 return $fallbackMessage;
             }
 
             $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
-            // Garante que o formato do histórico de chat corresponde à estrutura 'contents' esperada pelo Gemini
+            // Ensure the chat history format matches the 'contents' structure expected by Gemini
             $payload = [
                 'contents' => $chatHistory,
                 'generationConfig' => [
-                    'temperature' => 0.7, // Ajusta a criatividade conforme necessário
+                    'temperature' => 0.7, // Adjust creativity as needed
                     'topP'        => 0.95,
                     'topK'        => 40,
                 ],
@@ -555,12 +605,31 @@ class ProcessWhatsappMessage implements ShouldQueue
             if ($response->successful() && isset($result['candidates'][0]['content']['parts'][0]['text'])) {
                 return $result['candidates'][0]['content']['parts'][0]['text'];
             } else {
-                Log::warning("A chamada à API do Gemini falhou ou retornou uma estrutura inesperada: " . json_encode($result));
+                Log::warning("Gemini API call failed or returned an unexpected structure: " . json_encode($result));
                 return $fallbackMessage;
             }
         } catch (Exception $e) {
-            Log::error("Erro ao chamar a API do Gemini: " . $e->getMessage());
+            Log::error("Error calling Gemini API: " . $e->getMessage());
             return $fallbackMessage;
         }
+    }
+
+    /**
+     * Formats the qualification data into a readable description for the lead.
+     *
+     * @param array $data The collected qualification data.
+     * @return string
+     */
+    public function formatQualificationDataForDescription(array $data): string
+    {
+        $description = "Dados de Qualificação (SPIN/BANT) via WhatsApp:\n\n";
+        foreach ($data as $key => $value) {
+            // Filter out the problematic string
+            if ($value === "Over 9 levels deep, aborting normalization") {
+                $value = "N/A"; // Or an empty string, or a more appropriate placeholder
+            }
+            $description .= ucfirst(str_replace('_', ' ', $key)) . ": " . $value . "\n";
+        }
+        return $description;
     }
 }
