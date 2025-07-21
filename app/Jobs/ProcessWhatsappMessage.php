@@ -356,6 +356,10 @@ class ProcessWhatsappMessage implements ShouldQueue
                 if (isset($result['candidates'][0]['content']['parts'][0]['text'])) {
                     $jsonString = $result['candidates'][0]['content']['parts'][0]['text'];
 
+                    // Remover caracteres de controle inválidos e espaços/quebras de linha extras ANTES de procurar as chaves JSON
+                    $jsonString = preg_replace('/[[:cntrl:]]/', '', $jsonString); // Remove caracteres de controle
+                    $jsonString = trim($jsonString); // Remove espaços em branco (incluindo quebras de linha) do início e fim
+
                     // Tentar encontrar o início e o fim do objeto JSON
                     $jsonStart = strpos($jsonString, '{');
                     $jsonEnd = strrpos($jsonString, '}');
@@ -366,10 +370,6 @@ class ProcessWhatsappMessage implements ShouldQueue
                         Log::warning('Não foi possível encontrar um objeto JSON completo na resposta do Gemini.', ['raw_gemini_response_text' => $jsonString]);
                         return $this->getDefaultGeminiResponse();
                     }
-
-                    // Remover caracteres de controle inválidos e espaços/quebras de linha extras
-                    $jsonString = preg_replace('/[[:cntrl:]]/', '', $jsonString); // Remove caracteres de controle
-                    $jsonString = trim($jsonString); // Remove espaços em branco (incluindo quebras de linha) do início e fim
 
                     $parsedJson = json_decode($jsonString, true);
                     if (json_last_error() === JSON_ERROR_NONE) {
