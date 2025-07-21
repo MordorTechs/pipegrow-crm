@@ -245,6 +245,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
+        // Prompt aprimorado para ser mais explícito sobre a saída JSON pura
         $prompt = "Você é um assistente de pré-atendimento de vendas. Analise a seguinte mensagem de um cliente via WhatsApp. Extraia as seguintes informações:
         - Nome completo do cliente (se disponível)
         - Endereço de e-mail do cliente (se disponível)
@@ -253,7 +254,7 @@ class ProcessWhatsappMessage implements ShouldQueue
 
         Com base na análise, crie um texto de pré-atendimento amigável e profissional para o cliente, buscando mais informações para qualificá-lo.
 
-        Retorne a resposta em formato JSON, com as seguintes chaves:
+        Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. As chaves do JSON devem ser:
         - 'pre_attendance_text': O texto de pré-atendimento para o cliente.
         - 'contact_name': O nome completo do cliente.
         - 'contact_email': O e-mail do cliente.
@@ -310,10 +311,14 @@ class ProcessWhatsappMessage implements ShouldQueue
             if ($response->successful()) {
                 $result = $response->json();
                 // O Gemini pode retornar a resposta JSON dentro de uma string de texto.
-                // Precisamos garantir que estamos pegando o JSON correto.
+                // Precisamos garantir que estamos pegando o JSON correto e limpá-lo.
                 if (isset($result['candidates'][0]['content']['parts'][0]['text'])) {
                     $jsonString = $result['candidates'][0]['content']['parts'][0]['text'];
-                    // Tente decodificar a string JSON
+
+                    // Tentar remover caracteres de controle inválidos e espaços/quebras de linha extras
+                    $jsonString = preg_replace('/[[:cntrl:]]/', '', $jsonString); // Remove caracteres de controle
+                    $jsonString = trim($jsonString); // Remove espaços em branco (incluindo quebras de linha) do início e fim
+
                     $parsedJson = json_decode($jsonString, true);
                     if (json_last_error() === JSON_ERROR_NONE) {
                         return $parsedJson;
@@ -372,6 +377,13 @@ class ProcessWhatsappMessage implements ShouldQueue
     {
         $accessToken = env('WHATSAPP_ACCESS_TOKEN');
         $phoneNumberId = env('WHATSAPP_PHONE_NUMBER_ID'); // ID do seu número de telefone do WhatsApp Business API
+
+        // Adicionado log para depuração
+        Log::info('Tentando enviar mensagem WhatsApp com:', [
+            'to' => $to,
+            'phoneNumberId' => $phoneNumberId,
+            'accessToken_present' => !empty($accessToken) // Apenas verifica se está presente, não loga o token completo
+        ]);
 
         if (!$accessToken || !$phoneNumberId) {
             Log::error('Erro: WHATSAPP_ACCESS_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurados no .env. Não foi possível enviar a mensagem de resposta.');
