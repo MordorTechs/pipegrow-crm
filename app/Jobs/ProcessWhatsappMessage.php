@@ -74,7 +74,7 @@ class ProcessWhatsappMessage implements ShouldQueue
 
             // --- Gerenciamento de estado da conversa ---
             $cacheKeyConversationState = 'whatsapp_conversation_state_' . $from;
-            $conversationState = Cache::get($cacheKeyConversationState, 'awaiting_name'); // Estado inicial
+            $conversationState = Cache::get($cacheKeyConversationState, 'initial_greeting'); // Estado inicial: saudação
 
             // --- Extrair nome do contato do payload do webhook (se disponível) ---
             $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
@@ -170,46 +170,10 @@ class ProcessWhatsappMessage implements ShouldQueue
             }
 
 
-            // --- Lógica para criar ou encontrar um lead associado a esta pessoa ---
-            $lead = Lead::where('person_id', $person->id)
-                        ->whereIn('status', ['open', 'new'])
-                        ->first();
-
-            if (!$lead) {
-                Log::info('Criando novo lead para a pessoa: ' . $person->name);
-
-                $whatsappSource = Source::firstOrCreate(['name' => 'WhatsApp'], ['code' => 'whatsapp']);
-                
-                // Acessa o nome da organização de forma segura
-                $organizationNameForLead = optional($person->organization)->name;
-                $leadTitle = 'Lead WhatsApp de ' . $person->name . ($organizationNameForLead ? ' (' . $organizationNameForLead . ')' : '');
-
-                $lead = Lead::create([
-                    'title'               => $leadTitle,
-                    'lead_pipeline_id'    => 1, // Valor fixo conforme solicitado
-                    'lead_pipeline_stage_id' => 1, // Valor fixo conforme solicitado
-                    'lead_source_id'      => $whatsappSource->id ?? null,
-                    'lead_type_id'        => 1, // Valor fixo conforme solicitado
-                    'user_id'             => $person->user_id, // Mantém a atribuição ao user da pessoa
-                    'person_id'           => $person->id,
-                    'expected_close_date' => now()->addDays(7),
-                    'status'              => 'new',
-                    'lead_value'          => 0, // Valor fixo conforme solicitado
-                    'description'         => $text, // Adiciona a descrição do lead
-                ]);
-
-            } else {
-                Log::info('Lead existente encontrado para a pessoa: ' . $person->name);
-                // Atualiza o título do lead se o nome da empresa for coletado posteriormente
-                $organizationNameForLead = optional($person->organization)->name;
-                if ($organizationNameForLead && !str_contains($lead->title, $organizationNameForLead)) {
-                    $lead->update(['title' => 'Lead WhatsApp de ' . $person->name . ' (' . $organizationNameForLead . ')']);
-                }
-            }
-
             // --- Lógica para determinar a próxima mensagem e o próximo estado ---
             $preAttendanceText = '';
             $nextState = $conversationState;
+            $lead = null; // Inicializa $lead como null, será preenchido se o lead for criado/encontrado
 
             // Acessa o nome da organização de forma segura para a lógica de estado
             $personOrganizationName = optional($person->organization)->name;
@@ -220,21 +184,57 @@ class ProcessWhatsappMessage implements ShouldQueue
             $currentPersonCompany = !empty($contactCompany) ? $contactCompany : $personOrganizationName;
 
             // Define o texto de pré-atendimento e o próximo estado
-            if ($conversationState === 'awaiting_name') {
+            if ($conversationState === 'initial_greeting') {
+                $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM. Qual é o seu nome completo?";
+                $nextState = 'awaiting_name';
+            } elseif ($conversationState === 'awaiting_name') {
                 if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
                     // Nome foi fornecido, agora perguntar a empresa
                     $preAttendanceText = "Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
                     $nextState = 'awaiting_company';
                 } else {
-                    // Ainda aguardando o nome
+                    // Ainda aguardando o nome (caso o Gemini não tenha extraído ou a resposta foi genérica)
                     $preAttendanceText = "Olá! Qual é o seu nome completo?";
                     $nextState = 'awaiting_name';
                 }
             } elseif ($conversationState === 'awaiting_company') {
                 if (!empty($currentPersonCompany)) {
-                    // Empresa foi fornecida, finalizar
+                    // Empresa foi fornecida, finalizar e criar o lead
                     $preAttendanceText = "Ótimo, " . $currentPersonName . " da " . $currentPersonCompany . "! Um especialista da PipeGrow CRM entrará em contato em breve para entender melhor suas necessidades. Obrigado!";
                     $nextState = 'completed';
+
+                    // --- Criação/Atualização do Lead (movida para cá) ---
+                    $lead = Lead::where('person_id', $person->id)
+                                ->whereIn('status', ['open', 'new'])
+                                ->first();
+
+                    if (!$lead) { // Apenas cria se não houver um lead existente
+                        Log::info('Atendimento concluído. Criando novo lead para a pessoa: ' . $person->name);
+                        $whatsappSource = Source::firstOrCreate(['name' => 'WhatsApp'], ['code' => 'whatsapp']);
+                        
+                        $leadTitle = 'Lead WhatsApp de ' . $currentPersonName . ($currentPersonCompany ? ' (' . $currentPersonCompany . ')' : '');
+
+                        $lead = Lead::create([
+                            'title'               => $leadTitle,
+                            'lead_pipeline_id'    => 1, // Valor fixo conforme solicitado
+                            'lead_pipeline_stage_id' => 1, // Valor fixo conforme solicitado
+                            'lead_source_id'      => $whatsappSource->id ?? null,
+                            'lead_type_id'        => 1, // Valor fixo conforme solicitado
+                            'user_id'             => $person->user_id, // Mantém a atribuição ao user da pessoa
+                            'person_id'           => $person->id,
+                            'expected_close_date' => now()->addDays(7),
+                            'status'              => 'new',
+                            'lead_value'          => 0, // Valor fixo conforme solicitado
+                            'description'         => $text, // Adiciona a descrição do lead
+                        ]);
+                        Log::info('Novo lead criado:', ['lead_id' => $lead->id]);
+                    } else {
+                        Log::info('Atendimento concluído. Lead existente encontrado, atualizando título se necessário:', ['lead_id' => $lead->id]);
+                        // Atualiza o título do lead se o nome da empresa for coletado posteriormente
+                        if ($currentPersonCompany && !str_contains($lead->title, $currentPersonCompany)) {
+                            $lead->update(['title' => 'Lead WhatsApp de ' . $currentPersonName . ' (' . $currentPersonCompany . ')']);
+                        }
+                    }
                 } else {
                     // Ainda aguardando o nome da empresa
                     $preAttendanceText = "Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
@@ -244,8 +244,8 @@ class ProcessWhatsappMessage implements ShouldQueue
                 // Se o estado já está completo, apenas confirma o recebimento da mensagem
                 $preAttendanceText = "Olá novamente, " . $currentPersonName . "! Já recebemos suas informações. Um especialista entrará em contato em breve para te ajudar.";
             } else {
-                // Estado desconhecido ou inicial, volta para pedir o nome
-                $preAttendanceText = "Olá! Qual é o seu nome completo?";
+                // Estado desconhecido (fallback), volta para a saudação inicial
+                $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM. Qual é o seu nome completo?";
                 $nextState = 'awaiting_name';
             }
 
@@ -264,11 +264,13 @@ class ProcessWhatsappMessage implements ShouldQueue
                 'schedule_to'   => $timestamp ? \Carbon\Carbon::createFromTimestamp($timestamp) : now(),
             ];
 
-            if ($lead) {
+            if ($lead) { // Verifica se $lead foi definido (se o atendimento foi concluído)
                 $activityData['title'] = 'Mensagem WhatsApp Recebida (Lead: ' . $lead->title . ')';
                 $activityData['lead_id'] = $lead->id;
             } else {
                 $activityData['title'] = 'Mensagem WhatsApp Recebida';
+                // Se o lead ainda não foi criado, remove o lead_id para evitar erro
+                unset($activityData['lead_id']); 
             }
             Activity::create($activityData);
             Log::info('Mensagem original do WhatsApp adicionada como atividade.');
@@ -278,10 +280,13 @@ class ProcessWhatsappMessage implements ShouldQueue
             $activityData['schedule_from'] = now();
             $activityData['schedule_to'] = now();
 
-            if ($lead) {
+            if ($lead) { // Verifica se $lead foi definido
                 $activityData['title'] = 'Resposta Automática (Lead: ' . $lead->title . ')';
+                $activityData['lead_id'] = $lead->id;
             } else {
                 $activityData['title'] = 'Resposta Automática';
+                // Se o lead ainda não foi criado, remove o lead_id para evitar erro
+                unset($activityData['lead_id']);
             }
             Activity::create($activityData);
             Log::info('Resposta do assistente adicionada como atividade.');
@@ -388,7 +393,7 @@ class ProcessWhatsappMessage implements ShouldQueue
         Com base na última mensagem do cliente: \"{$message}\", extraia a informação relevante para o estado '{$conversationState}' e preencha o JSON.
 
         Lógica de extração baseada no estado:
-        - Se o estado for 'awaiting_name': Tente extrair o nome completo do cliente da última mensagem.
+        - Se o estado for 'awaiting_name' ou 'initial_greeting': Tente extrair o nome completo do cliente da última mensagem.
         - Se o estado for 'awaiting_company': Tente extrair o nome da empresa da última mensagem.
         - Se o estado for 'completed' ou outro: Apenas extraia qualquer nome ou empresa que possa ser fornecido, mesmo que o estado já seja 'completed'.
 
