@@ -76,6 +76,9 @@ class ProcessWhatsappMessage implements ShouldQueue
             $cacheKeyConversationState = 'whatsapp_conversation_state_' . $from;
             $conversationState = Cache::get($cacheKeyConversationState, 'initial_greeting'); // Estado inicial: saudação
 
+            // --- Extrair nome do contato do payload do webhook (se disponível) ---
+            $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
+            
             // --- Tente encontrar a pessoa (contato) no CRM ---
             $person = Person::where('contact_numbers', 'like', '%' . $from . '%')->first();
             
@@ -91,36 +94,37 @@ class ProcessWhatsappMessage implements ShouldQueue
             ]);
             
             // --- 1. Chamada ao Gemini 2.5 para extração de dados da última mensagem ---
+            // O Gemini agora focará apenas na extração de dados, sem gerar o texto de pré-atendimento.
             $geminiResponse = $this->callGeminiAPI($text, $knownContactNameForGemini, $knownContactEmailForGemini, $knownContactCompanyForGemini, $from, $conversationState);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
-            $extractedContactName = $geminiResponse['contact_name'] ?? null;
-            $extractedContactEmail = $geminiResponse['contact_email'] ?? null;
-            $extractedContactCompany = $geminiResponse['contact_company'] ?? null;
+            // Extrai os dados do Gemini. Se o Gemini retornar vazio ou "Não conhecido", tratamos como null.
+            $extractedContactName = ($geminiResponse['contact_name'] ?? '') === '' || ($geminiResponse['contact_name'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_name'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_name'];
+            $extractedContactEmail = ($geminiResponse['contact_email'] ?? '') === '' || ($geminiResponse['contact_email'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_email'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_email'];
+            $extractedContactCompany = ($geminiResponse['contact_company'] ?? '') === '' || ($geminiResponse['contact_company'] ?? '') === 'Não conhecido' || ($geminiResponse['contact_company'] ?? '') === 'Não mencionado' ? null : $geminiResponse['contact_company'];
             
-            // Garante que os dados extraídos sejam strings vazias se não forem válidos
-            $extractedContactEmail = (empty($extractedContactEmail) || $extractedContactEmail === 'Não conhecido' || $extractedContactEmail === 'Não mencionado') ? '' : $extractedContactEmail;
-            $extractedContactCompany = (empty($extractedContactCompany) || $extractedContactCompany === 'Não conhecido' || $extractedContactCompany === 'Não mencionado') ? '' : $extractedContactCompany;
-
-            // --- Determine os dados mais atualizados da pessoa (priorizando extração do Gemini) ---
+            // --- Determine os dados mais atualizados da pessoa (priorizando extração do Gemini e payload) ---
             $currentPersonName = optional($person)->name;
             $currentPersonCompany = optional(optional($person)->organization)->name;
             $currentPersonEmail = (json_decode(optional($person)->emails, true)[0]['value'] ?? null);
 
-            // Se o Gemini extraiu um nome mais específico, usa-o
-            if (!empty($extractedContactName) && $extractedContactName !== $currentPersonName && !str_starts_with($extractedContactName, 'Cliente WhatsApp ')) {
+            // Prioriza o nome extraído do Gemini
+            if (!empty($extractedContactName)) {
                 $currentPersonName = $extractedContactName;
-            } elseif (empty($currentPersonName) || str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
-                $currentPersonName = $extractedContactName; // Usa nome extraído se o atual é placeholder
+            } 
+            // Se o Gemini não extraiu, tenta usar o nome do payload do WhatsApp, se não for genérico
+            elseif (!empty($initialContactName) && !str_starts_with($initialContactName, 'Cliente WhatsApp ')) {
+                $currentPersonName = $initialContactName;
             }
 
-            // Se o Gemini extraiu uma empresa mais específica, usa-a
-            if (!empty($extractedContactCompany) && $extractedContactCompany !== $currentPersonCompany) {
+
+            // Prioriza a empresa extraída do Gemini
+            if (!empty($extractedContactCompany)) {
                 $currentPersonCompany = $extractedContactCompany;
             }
 
-            // Se o Gemini extraiu um email mais específico, usa-o
-            if (!empty($extractedContactEmail) && $extractedContactEmail !== $currentPersonEmail) {
+            // Prioriza o email extraído do Gemini
+            if (!empty($extractedContactEmail)) {
                 $currentPersonEmail = $extractedContactEmail;
             }
 
@@ -132,7 +136,14 @@ class ProcessWhatsappMessage implements ShouldQueue
             // Define o texto de pré-atendimento e o próximo estado
             if ($conversationState === 'initial_greeting') {
                 $preAttendanceText = "Olá! Bem-vindo(a) à PipeGrow CRM.";
-                $nextState = 'awaiting_name';
+                // Se já temos um nome razoável, pula para perguntar a empresa
+                if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
+                    $nextState = 'awaiting_company';
+                    $preAttendanceText .= " Olá, " . $currentPersonName . "! Qual o nome da empresa que você representa?";
+                } else {
+                    $nextState = 'awaiting_name';
+                    $preAttendanceText .= " Qual é o seu nome completo?";
+                }
             } elseif ($conversationState === 'awaiting_name') {
                 if (!empty($currentPersonName) && !str_starts_with($currentPersonName, 'Cliente WhatsApp ')) {
                     // Nome foi fornecido, agora perguntar a empresa
@@ -369,8 +380,8 @@ class ProcessWhatsappMessage implements ShouldQueue
         - Sua resposta DEVE ser APENAS um objeto JSON válido e COMPLETO.
         - Certifique-se de que TODAS as chaves JSON esperadas (contact_name, contact_email, contact_company) estejam presentes.
         - O valor de 'contact_email' DEVE ser uma string vazia (\" \").
-        - O valor de 'contact_name' DEVE ser o nome completo do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactName' do contexto se não houver um novo nome na última mensagem. Se 'knownContactName' for 'Não conhecido', então use \"\".
-        - O valor de 'contact_company' DEVE ser o nome da empresa do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactCompany' do contexto se não houver um novo nome de empresa na última mensagem. Se 'knownContactCompany' for 'Não conhecido', então use \"\".
+        - O valor de 'contact_name' DEVE ser o nome completo do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactName' do contexto se não houver um novo nome na última mensagem. Se 'knownContactName' for 'Não conhecido', então use \"\". É CRÍTICO que você sempre retorne o nome mais preciso e atualizado.
+        - O valor de 'contact_company' DEVE ser o nome da empresa do cliente, extraído da *última mensagem do cliente* se fornecido, OU o 'knownContactCompany' do contexto se não houver um novo nome de empresa na última mensagem. Se 'knownContactCompany' for 'Não conhecido', então use \"\". É CRÍTICO que você sempre retorne o nome da empresa mais preciso e atualizado.
         - O campo 'pre_attendance_text' DEVE ser uma string vazia (\" \"). O texto da resposta ao cliente será gerado no backend.
 
         Contexto atual do cliente (informações já conhecidas do CRM):
