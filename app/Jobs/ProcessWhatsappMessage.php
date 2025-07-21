@@ -313,9 +313,9 @@ class ProcessWhatsappMessage implements ShouldQueue
             $localNumber = substr($cleanedNumber, 4); // Pega o restante do número
             Log::info('formatBrazilianPhoneNumber: Brazilian number detected', ['ddd' => $ddd, 'localNumber' => $localNumber]);
 
-            // Se o número local tem 8 dígitos (total 12 com DDI+DDD),
-            // ele é um número de celular antigo ou um fixo que precisa do 9º dígito para ser um celular.
-            // A API do WhatsApp exige 13 dígitos para celulares brasileiros.
+            // Celulares brasileiros têm 9 dígitos após o DDD. Se o número local tem 8, adicionamos o '9'.
+            // Ex: 556281234567 (12 dígitos) -> 5562981234567 (13 dígitos)
+            // Ex: 5562994123173 (13 dígitos) - já está ok
             if (strlen($localNumber) === 8) {
                 $formattedNumber = '55' . $ddd . '9' . $localNumber;
                 Log::info('formatBrazilianPhoneNumber: Added 9th digit', ['formattedNumber' => $formattedNumber]);
@@ -338,23 +338,24 @@ class ProcessWhatsappMessage implements ShouldQueue
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
 
-        // Prompt aprimorado para ser mais explícito sobre a saída JSON pura e concisa
-        $prompt = "Você é um assistente de pré-atendimento de vendas. Analise a seguinte mensagem de um cliente via WhatsApp. Extraia as seguintes informações:
-        - Nome completo do cliente (se disponível)
-        - Endereço de e-mail do cliente (se disponível)
-        - Elementos da metodologia SPIN (Situação, Problema, Implicação, Necessidade de Solução)
-        - Elementos da metodologia BANT (Budget, Authority, Need, Timeline)
+        // Prompt aprimorado para guiar o fluxo da conversa: Nome > SPIN/BANT > Email
+        $prompt = "Você é um assistente de pré-atendimento de vendas. Seu objetivo é qualificar leads pelo WhatsApp, seguindo a seguinte ordem de prioridade para coletar informações:
+        1.  **Nome completo do cliente**: Peça o nome se ainda não o tiver.
+        2.  **Qualificação SPIN/BANT**: Faça perguntas baseadas em SPIN (Situação, Problema, Implicação, Necessidade de Solução) e BANT (Budget, Authority, Need, Timeline) para entender as necessidades do cliente.
+        3.  **Endereço de e-mail do cliente**: Peça o e-mail por último, após alguma qualificação inicial.
 
-        Com base na análise, crie um texto de pré-atendimento amigável e profissional para o cliente, buscando mais informações para qualificá-lo.
+        Analise a seguinte mensagem do cliente e o contexto da conversa (se aplicável, embora aqui seja uma única mensagem).
 
-        Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON. As chaves do JSON devem ser:
-        - 'pre_attendance_text': O texto de pré-atendimento para o cliente. Se a mensagem for muito genérica, faça uma pergunta aberta para coletar mais informações.
-        - 'contact_name': O nome completo do cliente.
-        - 'contact_email': O e-mail do cliente.
-        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara.
-        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara.
+        Com base na análise, crie um texto de pré-atendimento amigável e profissional para o cliente, buscando a PRÓXIMA informação na ordem de prioridade que você ainda não tem.
 
-        Se alguma informação não for encontrada, use 'Não mencionado' ou 'A ser qualificado' para os campos de nome e e-mail. Para os campos de 'spin_data' e 'bant_data', use 'Não qualificado' se a informação não for clara na mensagem.
+        Retorne a resposta em formato JSON, com as seguintes chaves:
+        - 'pre_attendance_text': O texto de pré-atendimento para o cliente.
+        - 'contact_name': O nome completo do cliente que você conseguiu extrair da mensagem. Se não tiver, use 'A ser qualificado'.
+        - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem. Se não tiver, use 'A ser qualificado'.
+        - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem.
+        - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem.
+
+        Sua resposta DEVE ser APENAS um objeto JSON válido, sem texto adicional, formatação, ou caracteres extras antes ou depois do JSON.
 
         Mensagem do cliente: \"{$message}\"";
 
@@ -452,7 +453,7 @@ class ProcessWhatsappMessage implements ShouldQueue
     protected function getDefaultGeminiResponse(): array
     {
         return [
-            'pre_attendance_text' => "Olá! Recebemos sua mensagem. Para que eu possa te ajudar melhor, poderia me dizer qual é o seu nome e um e-mail para contato?",
+            'pre_attendance_text' => "Olá! Recebemos sua mensagem. Para que eu possa te ajudar melhor, poderia me dizer qual é o seu nome completo?", // Alterado para pedir apenas o nome
             'contact_name'        => 'Não mencionado',
             'contact_email'       => 'Não mencionado',
             'spin_data'           => [
