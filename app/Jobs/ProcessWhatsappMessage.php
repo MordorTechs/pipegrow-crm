@@ -75,7 +75,8 @@ class ProcessWhatsappMessage implements ShouldQueue
             $initialContactName = $this->messageData['contacts'][0]['profile']['name'] ?? ('Cliente WhatsApp ' . $from);
 
             // --- 1. Pré-atendimento com Gemini 2.5 ---
-            $geminiResponse = $this->callGeminiAPI($text);
+            // Passa o nome inicial para o Gemini para que ele possa considerar no fluxo
+            $geminiResponse = $this->callGeminiAPI($text, $initialContactName);
             Log::info('Resposta do Gemini:', ['response' => $geminiResponse]);
 
             // Usar o nome do Gemini se for mais específico que o nome inicial, ou se o nome inicial for o padrão
@@ -331,12 +332,20 @@ class ProcessWhatsappMessage implements ShouldQueue
      * Faz a chamada à API do Gemini 2.5 para pré-atendimento.
      *
      * @param string $message O texto da mensagem do usuário.
+     * @param string $knownContactName O nome do contato já conhecido (do webhook ou de interações anteriores).
      * @return array A resposta processada do Gemini.
      */
-    protected function callGeminiAPI(string $message): array
+    protected function callGeminiAPI(string $message, string $knownContactName): array
     {
         $apiKey = env('GEMINI_API_KEY');
         $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={$apiKey}";
+
+        // Adiciona o nome conhecido ao prompt para que o Gemini possa considerar o contexto
+        $contextualPrompt = "Contexto atual: O nome do cliente é '{$knownContactName}'.";
+        if ($knownContactName === 'A ser qualificado' || str_starts_with($knownContactName, 'Cliente WhatsApp')) {
+            $contextualPrompt = "Contexto atual: O nome do cliente ainda não é conhecido.";
+        }
+
 
         // Prompt aprimorado para guiar o fluxo da conversa: Nome > SPIN/BANT > Email
         $prompt = "Você é um assistente de pré-atendimento de vendas. Seu objetivo é qualificar leads pelo WhatsApp, seguindo a seguinte ordem de prioridade para coletar informações:
@@ -344,14 +353,21 @@ class ProcessWhatsappMessage implements ShouldQueue
         2.  **Qualificação SPIN/BANT**: Faça perguntas baseadas em SPIN (Situação, Problema, Implicação, Necessidade de Solução) e BANT (Budget, Authority, Need, Timeline) para entender as necessidades do cliente.
         3.  **Endereço de e-mail do cliente**: Peça o e-mail por último, após alguma qualificação inicial.
 
-        Analise a seguinte mensagem do cliente e o contexto da conversa (se aplicável, embora aqui seja uma única mensagem).
+        {$contextualPrompt}
 
-        Com base na análise, crie um texto de pré-atendimento amigável e profissional para o cliente, buscando a PRÓXIMA informação na ordem de prioridade que você ainda não tem.
+        Analise a seguinte mensagem do cliente.
+
+        Com base na análise, crie um texto de pré-atendimento amigável e profissional para o cliente ('pre_attendance_text'), seguindo esta lógica:
+        - Se a mensagem contém o nome do cliente E o nome ainda não era conhecido, o 'pre_attendance_text' deve agradecer pelo nome e fazer uma pergunta de qualificação (SPIN/BANT).
+        - Se o nome do cliente JÁ é conhecido E a mensagem contém informações de qualificação (SPIN/BANT), o 'pre_attendance_text' deve reconhecer a informação e tentar pedir o e-mail.
+        - Se o nome do cliente JÁ é conhecido E a mensagem NÃO contém informações de qualificação, o 'pre_attendance_text' deve fazer uma pergunta de qualificação (SPIN/BANT).
+        - Se a mensagem NÃO contém nome NEM informações de qualificação E o nome ainda não era conhecido, o 'pre_attendance_text' deve pedir o nome do cliente.
+        - Se o nome e as qualificações já são conhecidos, o 'pre_attendance_text' deve pedir o e-mail.
 
         Retorne a resposta em formato JSON, com as seguintes chaves:
         - 'pre_attendance_text': O texto de pré-atendimento para o cliente.
-        - 'contact_name': O nome completo do cliente que você conseguiu extrair da mensagem. Se não tiver, use 'A ser qualificado'.
-        - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem. Se não tiver, use 'A ser qualificado'.
+        - 'contact_name': O nome completo do cliente que você conseguiu extrair da mensagem. Se não encontrar um nome claro, use 'A ser qualificado'. Se um nome foi fornecido na mensagem e é diferente de 'A ser qualificado', use-o.
+        - 'contact_email': O e-mail do cliente que você conseguiu extrair da mensagem. Se não encontrar, use 'A ser qualificado'.
         - 'spin_data': Um objeto JSON com as chaves 'situacao', 'problema', 'implicacao', 'necessidade'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem.
         - 'bant_data': Um objeto JSON com as chaves 'budget', 'authority', 'need', 'timeline'. Mantenha as descrições concisas (no máximo 1 frase) ou use 'Não qualificado' se a informação não for clara na mensagem.
 
