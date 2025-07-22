@@ -29,20 +29,22 @@ return [
                 'options' => 'Webkul\Core\Core@locales',
             ],
         ],
-    ], [
-        'key'    => 'general.general.admin_logo',
-        'name'   => 'admin::app.configuration.index.general.general.admin-logo.title',
-        'info'   => 'admin::app.configuration.index.general.general.admin-logo.title-info',
-        'sort'   => 2,
-        'fields' => [
-            [
-                'name'          => 'logo_image',
-                'title'         => 'admin::app.configuration.index.general.general.admin-logo.logo-image',
-                'type'          => 'image',
-                'validation'    => 'mimes:bmp,jpeg,jpg,png,webp,svg',
-            ],
-        ],
-    ], [
+    ], 
+    // [
+    //     'key'    => 'general.general.admin_logo',
+    //     'name'   => 'admin::app.configuration.index.general.general.admin-logo.title',
+    //     'info'   => 'admin::app.configuration.index.general.general.admin-logo.title-info',
+    //     'sort'   => 2,
+    //     'fields' => [
+    //         [
+    //             'name'          => 'logo_image',
+    //             'title'         => 'admin::app.configuration.index.general.general.admin-logo.logo-image',
+    //             'type'          => 'image',
+    //             'validation'    => 'mimes:bmp,jpeg,jpg,png,webp,svg',
+    //         ],
+    //     ],
+    // ], 
+    [
         'key'    => 'general.settings',
         'name'   => 'admin::app.configuration.index.general.settings.title',
         'info'   => 'admin::app.configuration.index.general.settings.info',
