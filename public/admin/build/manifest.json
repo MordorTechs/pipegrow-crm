@@ -281,8 +281,8 @@
     "src": "src/Resources/assets/images/dark-corner-clip.svg"
   },
   "src/Resources/assets/images/dark-logo.svg": {
-    "file": "assets/dark-logo-Bf5NtMox.svg",
-    "src": "src/Resources/assets/images/dark-logo.svg"
+    "file": "assets/logo-DQ5cXJfW.svg",
+    "src": "src/Resources/assets/images/logo.svg"
   },
   "src/Resources/assets/images/empty-placeholders/activities.svg": {
     "file": "assets/activities-DpB2XKqX.svg",
@@ -353,19 +353,19 @@
     "src": "src/Resources/assets/images/favicon.ico"
   },
   "src/Resources/assets/images/logo.svg": {
-    "file": "assets/logo-CSLo7rvK.svg",
+    "file": "assets/logo-DQ5cXJfW.svg",
     "src": "src/Resources/assets/images/logo.svg"
   },
   "src/Resources/assets/images/mobile-dark-logo.svg": {
-    "file": "assets/mobile-dark-logo-DQ5cXJfW.svg",
-    "src": "src/Resources/assets/images/mobile-dark-logo.svg"
+    "file": "assets/logo-DQ5cXJfW.svg",
+    "src": "src/Resources/assets/images/logo.svg"
   },
   "src/Resources/assets/images/mobile-light-logo.svg": {
-    "file": "assets/mobile-dark-logo-DQ5cXJfW.svg",
-    "src": "src/Resources/assets/images/mobile-dark-logo.svg"
+    "file": "assets/logo-DQ5cXJfW.svg",
+    "src": "src/Resources/assets/images/logo.svg"
   },
   "src/Resources/assets/js/app.js": {
-    "file": "assets/app-CCEaDZSX.js",
+    "file": "assets/app-CAjgs9mP.js",
     "name": "app",
     "src": "src/Resources/assets/js/app.js",
     "isEntry": true,
