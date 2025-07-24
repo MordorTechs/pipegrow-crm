@@ -3,6 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta property="og:image" content="{{asset('logo.png')}}" />
+    <meta property="og:url" content="https://app.pipegrow.com.br/privacy-policy" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="PipeGrow - CRM de Vendas Consultivas" />
+    <meta property="og:description" content="Centralize, automatize e feche mais negócios com a PipeGrow. Teste grátis." />
+    <meta property="fb:app_id" content="751116047366950" />
     <title>Política de Privacidade - PipeGrow CRM</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
