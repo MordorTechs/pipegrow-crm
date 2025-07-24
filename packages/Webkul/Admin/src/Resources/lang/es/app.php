@@ -2439,4 +2439,10 @@ return [
         'xls'        => 'XLS',
         'xlsx'       => 'XLSX',
     ],
+
+    'reports' => [
+        'index' => [
+            'title' => 'Ads Reports',
+        ],
+    ],
 ];
