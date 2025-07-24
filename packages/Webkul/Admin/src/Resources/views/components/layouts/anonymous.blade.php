@@ -31,6 +31,7 @@
         name="currency-code"
         {{-- content="{{ core()->getCurrentCurrencyCode() }}" --}}
     >
+    <meta property="og:image" content="{{asset('dark-logo.svg')}}" />
 
     @stack('meta')
 
