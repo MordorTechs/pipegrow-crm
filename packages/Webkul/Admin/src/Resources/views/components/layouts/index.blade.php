@@ -61,7 +61,7 @@
         href="{{ url('cache/logo/bagisto.png') }}"
     >
 
-    <meta property="og:image" content="{{asset('dark-logo.svg')}}" />
+    <meta property="og:image" content="{{asset('logo.png')}}" />
 
     @if ($favicon = core()->getConfigData('general.design.admin_logo.favicon'))
         <link
