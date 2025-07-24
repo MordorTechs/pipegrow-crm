@@ -60,6 +60,8 @@
         as="image"
         href="{{ url('cache/logo/bagisto.png') }}"
     >
+    
+    <meta property="og:image" content="https://app.pipegrow.com.br/images/thumb.jpg" />
 
     @if ($favicon = core()->getConfigData('general.design.admin_logo.favicon'))
         <link
