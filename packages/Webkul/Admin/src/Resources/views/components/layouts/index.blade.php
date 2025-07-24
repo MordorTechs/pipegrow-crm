@@ -62,7 +62,11 @@
     >
 
     <meta property="og:image" content="{{asset('logo.png')}}" />
-
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="PipeGrow - CRM de Vendas Consultivas" />
+    <meta property="og:description" content="Centralize, automatize e feche mais negócios com a PipeGrow. Teste grátis." />
+    <meta property="fb:app_id" content="751116047366950" />
+    
     @if ($favicon = core()->getConfigData('general.design.admin_logo.favicon'))
         <link
             type="image/x-icon"
