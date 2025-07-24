@@ -62,7 +62,7 @@
     >
 
     <meta property="og:image" content="{{asset('logo.png')}}" />
-    <meta property="og:url" content="https://app.pipegrow.com.br/" />
+    <meta property="og:url" content="https://app.pipegrow.com.br/admin/login" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="PipeGrow - CRM de Vendas Consultivas" />
     <meta property="og:description" content="Centralize, automatize e feche mais negócios com a PipeGrow. Teste grátis." />
