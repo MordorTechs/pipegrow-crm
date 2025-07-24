@@ -101,8 +101,8 @@
                 {!! view_render_event('admin.sessions.login.form_controls.after') !!}
             </div>
         </div>        
+        <a href="{{env('APP_URL').'/privacy-policy'}}"  target="_blank" >Política de Privacidade.</a>
     </div>
-
     @push('scripts')
         <script>
             function switchVisibility() {
