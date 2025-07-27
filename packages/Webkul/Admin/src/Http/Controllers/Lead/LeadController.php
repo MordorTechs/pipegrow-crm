@@ -316,7 +316,7 @@ class LeadController extends Controller
 
         $lead = $this->leadRepository->update(
             [
-                'closed_at'              => request()->input('closed_at'),
+                'closed_at'              => request()->date('closed_at'),
                 'entity_type'            => 'leads',
                 'lead_pipeline_stage_id' => $stage->id,
             ],
