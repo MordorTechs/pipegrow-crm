@@ -3,7 +3,7 @@
 return [
     [
         'key' => 'reports',
-        'name' =>  'admin::app.reports.index.title',
+        'name' =>  'Relatório Ads',
         'route' => 'admin.reports.index',
         'sort' => 2,
         'icon-class' => 'icon-note',
