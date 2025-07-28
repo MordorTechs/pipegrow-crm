@@ -40,7 +40,7 @@ class FacebookAuthController
 
         $token = json_decode($responseToken, true);
         
-        $responseBigToken = Http::get('https://graph.facebook.com/v19.0/me/accounts', [
+        $responseBigToken = Http::get('https://graph.facebook.com/v23.0/me/accounts', [
             'access_token' => $token['access_token']
         ]);
 
